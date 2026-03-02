@@ -302,6 +302,16 @@ def _validate_collector_policy(collector_policy: str) -> None:
         raise ValueError(f"Unsupported collector_policy: {collector_policy}")
 
 
+def _find_resume_replay_path(replay_out_dir: Path, resume_run_id: str) -> Path | None:
+    latest = replay_out_dir / f"{resume_run_id}_replay_latest.npz"
+    if latest.exists():
+        return latest
+    candidates = sorted(replay_out_dir.glob(f"{resume_run_id}_cycle_*_replay.npz"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def _one_hot_policy_target(mask: np.ndarray, action: int) -> np.ndarray:
     if mask.shape != (ACTION_DIM,):
         raise ValueError(f"Expected mask shape ({ACTION_DIM},), got {mask.shape}")
@@ -1002,6 +1012,7 @@ def run_cycles(
     benchmark_seed: int | None = 42,
     resume_checkpoint: str | None = None,
     resume_run_id_suffix: str = "resume",
+    resume_replay_path: str | None = None,
     auto_promote: bool = False,
     promotion_games: int = 50,
     promotion_threshold_winrate: float = 0.65,
@@ -1055,10 +1066,12 @@ def run_cycles(
 
     resumed_from_metadata: dict[str, object] = {}
     resume_base_cycle_idx = 0
+    resume_from_run_id: str | None = None
     if resume_checkpoint:
         loaded_ckpt = load_checkpoint_with_metadata(resume_checkpoint, device=device)
         model = loaded_ckpt.model.to(device)
         resume_base_cycle_idx = int(loaded_ckpt.cycle_idx)
+        resume_from_run_id = str(loaded_ckpt.run_id)
         resumed_from_metadata = {
             "resume_from_checkpoint_path": str(loaded_ckpt.path),
             "resume_from_run_id": loaded_ckpt.run_id,
@@ -1157,6 +1170,24 @@ def run_cycles(
     replay_out_dir = Path("nn_artifacts/replay")
     rolling_replay_state_path = replay_out_dir / f"{run_id}_replay_latest.npz"
     last_saved_replay_path: Path | None = None
+    if rolling_replay:
+        selected_resume_replay_path: Path | None = None
+        if resume_replay_path:
+            selected_resume_replay_path = Path(resume_replay_path)
+        elif resume_checkpoint and resume_from_run_id:
+            selected_resume_replay_path = _find_resume_replay_path(replay_out_dir, resume_from_run_id)
+        if selected_resume_replay_path is not None:
+            if not selected_resume_replay_path.exists():
+                raise FileNotFoundError(f"resume_replay_path not found: {selected_resume_replay_path}")
+            replay = ReplayBuffer.load_npz(selected_resume_replay_path)
+            resumed_from_metadata["resume_from_replay_path"] = str(selected_resume_replay_path.resolve())
+            resumed_from_metadata["resume_from_replay_samples"] = float(len(replay))
+            print(
+                f"resume_replay_loaded path={selected_resume_replay_path.resolve()} "
+                f"samples={len(replay)}"
+            )
+    elif resume_replay_path:
+        print("resume_replay_note=resume_replay_path_ignored_without_rolling_replay")
 
     with SplendorNativeEnv() as env:
         for cycle_idx in range(1, cycles + 1):
@@ -1711,6 +1742,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--benchmark-cycle-idx", type=int, default=0)
     p.add_argument("--resume-checkpoint", type=str, default=None)
     p.add_argument("--resume-run-id-suffix", type=str, default="resume")
+    p.add_argument("--resume-replay-path", type=str, default=None)
     p.add_argument("--auto-promote", action="store_true")
     p.add_argument("--promotion-games", type=int, default=50)
     p.add_argument("--promotion-threshold-winrate", type=float, default=0.65)
@@ -1786,6 +1818,7 @@ def main() -> None:
             benchmark_seed=args.benchmark_seed,
             resume_checkpoint=args.resume_checkpoint,
             resume_run_id_suffix=args.resume_run_id_suffix,
+            resume_replay_path=args.resume_replay_path,
             auto_promote=args.auto_promote,
             promotion_games=args.promotion_games,
             promotion_threshold_winrate=args.promotion_threshold_winrate,
