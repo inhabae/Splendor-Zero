@@ -15,6 +15,7 @@ if np is not None and torch is not None:
     from nn.model import MaskedPolicyValueNet
     from nn.state_schema import ACTION_DIM, STATE_DIM
     from nn.train import (
+        _recommend_mcts_collector_workers,
         _model_sample_legal_action,
         masked_cross_entropy_loss,
         masked_soft_cross_entropy_loss,
@@ -28,6 +29,7 @@ else:
     ACTION_DIM = 69
     STATE_DIM = 246
     _model_sample_legal_action = None
+    _recommend_mcts_collector_workers = None
     masked_cross_entropy_loss = None
     masked_soft_cross_entropy_loss = None
     masked_logits = None
@@ -39,6 +41,24 @@ else:
 @unittest.skipIf(np is None, "numpy not installed")
 @unittest.skipIf(torch is None, "torch not installed")
 class TestNNTrainUtils(unittest.TestCase):
+    def test_recommend_mcts_collector_workers_prefers_single_for_tiny_workload(self):
+        workers = _recommend_mcts_collector_workers(
+            requested_workers=8,
+            episodes_per_cycle=8,
+            max_turns=2,
+            mcts_sims=1,
+        )
+        self.assertEqual(workers, 1)
+
+    def test_recommend_mcts_collector_workers_caps_by_workload(self):
+        workers = _recommend_mcts_collector_workers(
+            requested_workers=16,
+            episodes_per_cycle=6,
+            max_turns=80,
+            mcts_sims=128,
+        )
+        self.assertEqual(workers, 3)
+
     def test_masked_logits_shape_mismatch_raises(self):
         logits = torch.zeros((2, ACTION_DIM))
         mask = torch.zeros((3, ACTION_DIM), dtype=torch.bool)

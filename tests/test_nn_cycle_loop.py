@@ -136,21 +136,21 @@ class TestNNCycleLoopHelpers(unittest.TestCase):
 
         def _fake_collect_replay_parallel_mcts(*args, **kwargs):
             return {
-                "episodes": 2.0,
-                "terminal_episodes": 2.0,
+                "episodes": 20.0,
+                "terminal_episodes": 20.0,
                 "cutoff_episodes": 0.0,
-                "replay_samples": 2.0,
-                "total_steps": 2.0,
-                "total_turns": 2.0,
+                "replay_samples": 20.0,
+                "total_steps": 20.0,
+                "total_turns": 20.0,
                 "collector_random_actions": 0.0,
                 "collector_model_actions": 0.0,
-                "collector_mcts_actions": 2.0,
+                "collector_mcts_actions": 20.0,
                 "mcts_avg_search_ms": 0.0,
                 "mcts_avg_root_entropy": 0.0,
                 "mcts_avg_root_top1_visit_prob": 0.0,
                 "mcts_avg_selected_visit_prob": 0.0,
                 "mcts_avg_root_value": 0.0,
-                "collector_workers_used": 2.0,
+                "collector_workers_used": 4.0,
                 "next_seed": 125,
             }
 
@@ -186,9 +186,9 @@ class TestNNCycleLoopHelpers(unittest.TestCase):
                         with mock.patch.object(train_mod, "_evaluate_on_replay_full", side_effect=_fake_eval):
                             metrics = train_mod.run_cycles(
                                 cycles=1,
-                                episodes_per_cycle=2,
+                                episodes_per_cycle=20,
                                 train_steps_per_cycle=1,
-                                max_turns=10,
+                                max_turns=80,
                                 collector_policy="mcts",
                                 collector_workers=4,
                                 seed=123,
@@ -197,7 +197,8 @@ class TestNNCycleLoopHelpers(unittest.TestCase):
         p_mock.assert_called_once()
         s_mock.assert_not_called()
         self.assertEqual(metrics["collector_policy"], "mcts")
-        self.assertEqual(metrics["episodes"], 2.0)
+        self.assertEqual(metrics["episodes"], 20.0)
+        self.assertEqual(metrics["collector_workers_requested"], 4.0)
         self.assertEqual(metrics["collector_workers"], 4.0)
 
     def test_mcts_root_dirichlet_noise_config_wiring(self):

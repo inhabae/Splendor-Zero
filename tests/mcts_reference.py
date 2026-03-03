@@ -204,6 +204,59 @@ def run_reference_mcts(
     completed = 0
     total_evaluated = 0
 
+    def _evaluate_pending(pending: list[_PendingLeafEval], backups: list[_ReadyBackup]) -> None:
+        nonlocal root_noise_applied, total_evaluated
+        if not pending:
+            return
+
+        batch_states = np.stack([req.state for req in pending], axis=0).astype(np.float32, copy=False)
+        batch_masks = np.stack([req.mask for req in pending], axis=0).astype(np.bool_, copy=False)
+        priors_raw, values_raw = evaluator(batch_states, batch_masks)
+        priors_raw = np.asarray(priors_raw, dtype=np.float32)
+        values_raw = np.asarray(values_raw, dtype=np.float32)
+
+        if priors_raw.shape != (len(pending), ACTION_DIM):
+            raise RuntimeError("Reference evaluator priors must have shape (B, ACTION_DIM)")
+        if values_raw.shape != (len(pending),):
+            raise RuntimeError("Reference evaluator values must have shape (B,)")
+
+        for i, req in enumerate(pending):
+            node = nodes[req.node_index]
+            node.priors = _normalize_priors(priors_raw[i], req.mask)
+            value = float(values_raw[i])
+            if not np.isfinite(value):
+                raise RuntimeError("Reference evaluator values contain non-finite entries")
+            node.expanded = True
+            node.pending_eval = False
+
+            if req.node_index == 0 and (not root_noise_applied) and bool(root_dirichlet_noise):
+                _apply_dirichlet_root_noise(
+                    node.priors,
+                    req.mask,
+                    float(root_dirichlet_epsilon),
+                    float(root_dirichlet_alpha_total),
+                    rng,
+                )
+                root_noise_applied = True
+
+            backups.append(_ReadyBackup(value=value, path=req.path))
+            total_evaluated += 1
+
+    # Pre-expand root to match native implementation semantics.
+    root = nodes[0]
+    root.pending_eval = True
+    _evaluate_pending(
+        [
+            _PendingLeafEval(
+                node_index=0,
+                state=np.asarray(root_state.state, dtype=np.float32, copy=True),
+                mask=np.asarray(root_state.mask, dtype=np.bool_, copy=True),
+                path=[],
+            )
+        ],
+        [],
+    )
+
     while completed < int(num_simulations):
         target_batch = min(int(eval_batch_size), int(num_simulations) - completed)
         pending: list[_PendingLeafEval] = []
@@ -256,39 +309,7 @@ def run_reference_mcts(
                 path.append(_PathStep(node_index=node_index, action=int(action), same_player=bool(same_player)))
                 node_index = child_idx
 
-        if pending:
-            batch_states = np.stack([req.state for req in pending], axis=0).astype(np.float32, copy=False)
-            batch_masks = np.stack([req.mask for req in pending], axis=0).astype(np.bool_, copy=False)
-            priors_raw, values_raw = evaluator(batch_states, batch_masks)
-            priors_raw = np.asarray(priors_raw, dtype=np.float32)
-            values_raw = np.asarray(values_raw, dtype=np.float32)
-
-            if priors_raw.shape != (len(pending), ACTION_DIM):
-                raise RuntimeError("Reference evaluator priors must have shape (B, ACTION_DIM)")
-            if values_raw.shape != (len(pending),):
-                raise RuntimeError("Reference evaluator values must have shape (B,)")
-
-            for i, req in enumerate(pending):
-                node = nodes[req.node_index]
-                node.priors = _normalize_priors(priors_raw[i], req.mask)
-                value = float(values_raw[i])
-                if not np.isfinite(value):
-                    raise RuntimeError("Reference evaluator values contain non-finite entries")
-                node.expanded = True
-                node.pending_eval = False
-
-                if req.node_index == 0 and (not root_noise_applied) and bool(root_dirichlet_noise):
-                    _apply_dirichlet_root_noise(
-                        node.priors,
-                        req.mask,
-                        float(root_dirichlet_epsilon),
-                        float(root_dirichlet_alpha_total),
-                        rng,
-                    )
-                    root_noise_applied = True
-
-                backups.append(_ReadyBackup(value=value, path=req.path))
-                total_evaluated += 1
+        _evaluate_pending(pending, backups)
 
         if not backups:
             raise RuntimeError("Reference MCTS made no progress while gathering/evaluating leaves")
