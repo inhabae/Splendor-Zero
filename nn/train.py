@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import tempfile
@@ -23,10 +24,10 @@ from .champions import (
     load_champion_registry,
     save_champion_registry,
 )
-from .checkpoints import load_checkpoint_with_metadata, save_checkpoint
+from .checkpoints import load_checkpoint, load_checkpoint_with_metadata, save_checkpoint
 from .mcts import MCTSConfig, run_mcts
 from .model import MaskedPolicyValueNet
-from .opponents import CheckpointMCTSOpponent, GreedyHeuristicOpponent, RandomOpponent
+from .opponents import CheckpointMCTSOpponent, GreedyHeuristicOpponent, ModelMCTSOpponent, RandomOpponent
 from .replay import ReplayBuffer, ReplaySample
 from .selfplay_dataset import SelfPlayWorkerPool, run_selfplay_session_parallel
 from .state_schema import ACTION_DIM, STATE_DIM
@@ -39,6 +40,8 @@ except Exception:
 
 MASK_FILL_VALUE = -1e9
 SIGN_EPS = 1e-6
+HEURISTIC_EVAL_MCTS_SIMS = 64
+HEURISTIC_EVAL_GAMES = 50
 
 
 def masked_logits(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -85,48 +88,6 @@ def masked_soft_cross_entropy_loss(logits: torch.Tensor, mask: torch.Tensor, tar
 
 def select_masked_argmax(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return torch.argmax(masked_logits(logits, mask), dim=-1)
-
-
-def select_masked_sample(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    masked = masked_logits(logits, mask)
-    return torch.distributions.Categorical(logits=masked).sample()
-
-
-def _uniform_random_legal_action(mask: np.ndarray, rng: random.Random) -> int:
-    legal = np.flatnonzero(mask)
-    if legal.size == 0:
-        raise RuntimeError("Mask contains no legal actions")
-    return int(rng.choice(legal.tolist()))
-
-
-def _model_sample_legal_action(
-    model: MaskedPolicyValueNet,
-    state_np: np.ndarray,
-    mask_np: np.ndarray,
-    *,
-    device: str,
-) -> int:
-    if state_np.shape != (STATE_DIM,):
-        raise ValueError(f"Expected state shape ({STATE_DIM},), got {state_np.shape}")
-    if mask_np.shape != (ACTION_DIM,):
-        raise ValueError(f"Expected mask shape ({ACTION_DIM},), got {mask_np.shape}")
-    if not bool(mask_np.any()):
-        raise ValueError("Model-sample collector requires at least one legal action")
-
-    state_t = torch.as_tensor(state_np[None, :], dtype=torch.float32, device=device)
-    mask_t = torch.as_tensor(mask_np[None, :], dtype=torch.bool, device=device)
-
-    model.eval()
-    with torch.no_grad():
-        logits, _value = model(state_t)
-        action_t = select_masked_sample(logits, mask_t)
-
-    action = int(action_t.item())
-    if not (0 <= action < ACTION_DIM):
-        raise RuntimeError(f"Model-sampled action out of range: {action}")
-    if not bool(mask_np[action]):
-        raise RuntimeError(f"Model-sampled illegal action {action}")
-    return action
 
 
 @dataclass
@@ -320,11 +281,6 @@ def _promotion_decision_from_suite(
     return True, "bootstrap_random_floor_met", metrics
 
 
-def _validate_collector_policy(collector_policy: str) -> None:
-    if collector_policy not in ("random", "model-sample", "mcts"):
-        raise ValueError(f"Unsupported collector_policy: {collector_policy}")
-
-
 def _find_resume_replay_path(replay_out_dir: Path, resume_run_id: str) -> Path | None:
     latest = replay_out_dir / f"{resume_run_id}_replay_latest.npz"
     if latest.exists():
@@ -335,16 +291,59 @@ def _find_resume_replay_path(replay_out_dir: Path, resume_run_id: str) -> Path |
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def _one_hot_policy_target(mask: np.ndarray, action: int) -> np.ndarray:
-    if mask.shape != (ACTION_DIM,):
-        raise ValueError(f"Expected mask shape ({ACTION_DIM},), got {mask.shape}")
-    if not (0 <= int(action) < ACTION_DIM):
-        raise ValueError(f"Action out of range for one-hot policy target: {action}")
-    if not bool(mask[int(action)]):
-        raise ValueError("One-hot policy target action must be legal")
-    target = np.zeros((ACTION_DIM,), dtype=np.float32)
-    target[int(action)] = 1.0
-    return target
+def _sanitize_run_id_for_filename(run_id: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in str(run_id))
+    safe = safe.strip("._")
+    return safe or "run"
+
+
+def _resolve_champion_lineage_registry_path(
+    *,
+    run_id: str,
+    resume_from_run_id: str | None,
+    champion_registry_dir: str,
+) -> tuple[str, Path]:
+    lineage_run_id = str(resume_from_run_id) if resume_from_run_id else str(run_id)
+    registry_path = Path(champion_registry_dir) / f"{_sanitize_run_id_for_filename(lineage_run_id)}.json"
+    return lineage_run_id, registry_path
+
+
+def _load_current_champion_checkpoint_for_cycle(
+    *,
+    champion_registry_path: Path,
+    cycle_idx: int,
+    cycles: int,
+) -> str | None:
+    try:
+        registry = load_champion_registry(champion_registry_path)
+    except Exception as exc:
+        print(f"cycle_selfplay_warning={cycle_idx}/{cycles} registry_load_failed={exc}")
+        return None
+    champs = get_current_and_previous_champions(registry)
+    if not champs:
+        return None
+    ckpt_path = Path(str(champs[0].checkpoint_path))
+    if not ckpt_path.exists():
+        print(f"cycle_selfplay_warning={cycle_idx}/{cycles} champion_checkpoint_missing={ckpt_path}")
+        return None
+    try:
+        load_checkpoint_with_metadata(ckpt_path, device="cpu")
+    except Exception as exc:
+        print(f"cycle_selfplay_warning={cycle_idx}/{cycles} champion_checkpoint_invalid={exc}")
+        return None
+    return str(ckpt_path)
+
+
+def _require_mcts_collector_policy(collector_policy: str | None) -> None:
+    if collector_policy is None or str(collector_policy) == "mcts":
+        return
+    raise ValueError("collector_policy is fixed to 'mcts'; random/model-sample are no longer supported")
+
+
+def _append_jsonl_row(path: Path, row: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
 
 
 def collect_episode(
@@ -354,7 +353,6 @@ def collect_episode(
     seed: int,
     max_turns: int,
     rng: random.Random,
-    collector_policy: str,
     model: Optional[MaskedPolicyValueNet] = None,
     device: str = "cpu",
     collector_stats: Optional[CollectorStats] = None,
@@ -380,44 +378,29 @@ def collect_episode(
             raise AssertionError("No legal actions in non-terminal state")
 
         player_id = env.current_player_id
-        if collector_policy == "random":
-            action = _uniform_random_legal_action(state.mask, rng)
-            policy_target = _one_hot_policy_target(state.mask, action)
-            if collector_stats is not None:
-                collector_stats.random_actions += 1
-        elif collector_policy == "model-sample":
-            if model is None:
-                raise ValueError("collector_policy='model-sample' requires a model")
-            action = _model_sample_legal_action(model, state.state, state.mask, device=device)
-            policy_target = _one_hot_policy_target(state.mask, action)
-            if collector_stats is not None:
-                collector_stats.model_actions += 1
-        elif collector_policy == "mcts":
-            if model is None:
-                raise ValueError("collector_policy='mcts' requires a model")
-            t0 = time.perf_counter()
-            mcts_result = run_mcts(
-                env,
-                model,
-                state,
-                turns_taken=turns_taken,
-                device=device,
-                config=mcts_config,
-                rng=rng,
-            )
-            elapsed = time.perf_counter() - t0
-            action = int(mcts_result.chosen_action_idx)
-            policy_target = np.asarray(mcts_result.visit_probs, dtype=np.float32)
-            if collector_stats is not None:
-                collector_stats.mcts_actions += 1
-                collector_stats.mcts_sum_search_seconds += float(elapsed)
-                collector_stats.mcts_sum_root_entropy += _policy_entropy(policy_target, state.mask)
-                legal_probs = policy_target[state.mask]
-                collector_stats.mcts_sum_root_top1_prob += float(np.max(legal_probs)) if legal_probs.size > 0 else 0.0
-                collector_stats.mcts_sum_selected_visit_prob += float(policy_target[action])
-                collector_stats.mcts_sum_root_value += float(mcts_result.root_value)
-        else:
-            raise ValueError(f"Unknown collector_policy: {collector_policy}")
+        if model is None:
+            raise ValueError("MCTS collector requires a model")
+        t0 = time.perf_counter()
+        mcts_result = run_mcts(
+            env,
+            model,
+            state,
+            turns_taken=turns_taken,
+            device=device,
+            config=mcts_config,
+            rng=rng,
+        )
+        elapsed = time.perf_counter() - t0
+        action = int(mcts_result.chosen_action_idx)
+        policy_target = np.asarray(mcts_result.visit_probs, dtype=np.float32)
+        if collector_stats is not None:
+            collector_stats.mcts_actions += 1
+            collector_stats.mcts_sum_search_seconds += float(elapsed)
+            collector_stats.mcts_sum_root_entropy += _policy_entropy(policy_target, state.mask)
+            legal_probs = policy_target[state.mask]
+            collector_stats.mcts_sum_root_top1_prob += float(np.max(legal_probs)) if legal_probs.size > 0 else 0.0
+            collector_stats.mcts_sum_selected_visit_prob += float(policy_target[action])
+            collector_stats.mcts_sum_root_value += float(mcts_result.root_value)
         if not bool(state.mask[action]):
             raise AssertionError("Sampled action is not legal")
 
@@ -472,7 +455,7 @@ def _collect_replay(
     episodes: int,
     max_turns: int,
     rng: random.Random,
-    collector_policy: str,
+    collector_policy: str | None = None,
     model: MaskedPolicyValueNet,
     device: str,
     seed_start: int,
@@ -480,7 +463,7 @@ def _collect_replay(
 ) -> dict[str, object]:
     if episodes <= 0:
         raise ValueError("episodes must be positive")
-    _validate_collector_policy(collector_policy)
+    _require_mcts_collector_policy(collector_policy)
     collect_t0 = time.perf_counter()
 
     cutoff_count = 0
@@ -497,7 +480,6 @@ def _collect_replay(
             seed=next_seed,
             max_turns=max_turns,
             rng=rng,
-            collector_policy=collector_policy,
             model=model,
             device=device,
             collector_stats=collector_stats,
@@ -547,6 +529,7 @@ def _collect_replay_parallel_mcts(
     mcts_config: MCTSConfig,
     workers: int,
     worker_pool: SelfPlayWorkerPool | None = None,
+    checkpoint_path_override: str | Path | None = None,
 ) -> dict[str, object]:
     if episodes <= 0:
         raise ValueError("episodes must be positive")
@@ -555,32 +538,40 @@ def _collect_replay_parallel_mcts(
     collect_t0 = time.perf_counter()
     workers_used = min(int(workers), int(episodes))
 
-    with tempfile.TemporaryDirectory(prefix="splendor_parallel_collect_") as tmp_dir:
-        checkpoint = save_checkpoint(
-            model,
-            output_dir=tmp_dir,
-            run_id="parallel_collect",
-            cycle_idx=0,
-            metadata={"seed": int(seed_start), "mcts_sims": int(mcts_config.num_simulations)},
-        )
+    def _run_session(checkpoint_path: str) -> object:
         if worker_pool is not None:
-            session = worker_pool.run_session(
-                checkpoint_path=str(checkpoint.path),
+            return worker_pool.run_session(
+                checkpoint_path=checkpoint_path,
                 games=int(episodes),
                 max_turns=int(max_turns),
                 num_simulations=int(mcts_config.num_simulations),
                 seed_base=int(seed_start),
                 workers=int(workers_used),
             )
-        else:
-            session = run_selfplay_session_parallel(
-                checkpoint_path=str(checkpoint.path),
-                games=int(episodes),
-                max_turns=int(max_turns),
-                num_simulations=int(mcts_config.num_simulations),
-                seed_base=int(seed_start),
-                workers=int(workers_used),
+        return run_selfplay_session_parallel(
+            checkpoint_path=checkpoint_path,
+            games=int(episodes),
+            max_turns=int(max_turns),
+            num_simulations=int(mcts_config.num_simulations),
+            seed_base=int(seed_start),
+            workers=int(workers_used),
+        )
+
+    if checkpoint_path_override is not None:
+        ckpt_path = Path(checkpoint_path_override)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+        session = _run_session(str(ckpt_path))
+    else:
+        with tempfile.TemporaryDirectory(prefix="splendor_parallel_collect_") as tmp_dir:
+            checkpoint = save_checkpoint(
+                model,
+                output_dir=tmp_dir,
+                run_id="parallel_collect",
+                cycle_idx=0,
+                metadata={"seed": int(seed_start), "mcts_sims": int(mcts_config.num_simulations)},
             )
+            session = _run_session(str(checkpoint.path))
 
     steps_by_episode: dict[int, dict[str, int | bool]] = {}
     for step in session.steps:
@@ -807,8 +798,8 @@ def run_smoke(
     *,
     episodes: int = 5,
     max_turns: int = 80,
-    batch_size: int = 32,
-    collector_policy: str = "random",
+    batch_size: int = 256,
+    collector_policy: str | None = None,
     train_steps: int = 1,
     log_every: int = 10,
     lr: float = 3e-4,
@@ -819,14 +810,13 @@ def run_smoke(
     mcts_c_puct: float = 1.25,
     mcts_temperature_moves: int = 10,
     mcts_temperature: float = 1.0,
-    mcts_root_dirichlet_noise: bool = False,
+    mcts_root_dirichlet_noise: bool = True,
     mcts_root_dirichlet_epsilon: float = 0.25,
     mcts_root_dirichlet_alpha_total: float = 10.0,
     visualize: bool = False,
     viz_dir: str = "nn_artifacts/viz",
     viz_run_name: str | None = None,
     viz_save_every_cycle: int = 1,
-    viz_smoke_enable: bool = False,
 ) -> dict[str, object]:
     random.seed(seed)
     np.random.seed(seed)
@@ -834,7 +824,7 @@ def run_smoke(
 
     if episodes <= 0:
         raise ValueError("episodes must be positive")
-    _validate_collector_policy(collector_policy)
+    _require_mcts_collector_policy(collector_policy)
 
     replay = ReplayBuffer()
     rng = random.Random(seed)
@@ -850,7 +840,7 @@ def run_smoke(
 
     model = MaskedPolicyValueNet().to(device)
     run_id = f"smoke_{int(time.time())}_{int(seed)}"
-    do_viz = bool(viz_smoke_enable)
+    do_viz = bool(visualize)
     viz_logger = None
     if do_viz:
         if MetricsVizLogger is None:
@@ -1002,7 +992,7 @@ def run_smoke(
     metrics.update(
         {
             "mode": "smoke",
-            "collector_policy": collector_policy,
+            "collector_policy": "mcts",
             "collector_random_actions": collection_metrics["collector_random_actions"],
             "collector_model_actions": collection_metrics["collector_model_actions"],
             "collector_mcts_actions": collection_metrics["collector_mcts_actions"],
@@ -1031,8 +1021,8 @@ def run_cycles(
     episodes_per_cycle: int = 5,
     train_steps_per_cycle: int = 50,
     max_turns: int = 80,
-    batch_size: int = 32,
-    collector_policy: str = "random",
+    batch_size: int = 256,
+    collector_policy: str | None = None,
     log_every: int = 10,
     lr: float = 3e-4,
     weight_decay: float = 1e-4,
@@ -1042,30 +1032,34 @@ def run_cycles(
     mcts_c_puct: float = 1.25,
     mcts_temperature_moves: int = 10,
     mcts_temperature: float = 1.0,
-    mcts_root_dirichlet_noise: bool = False,
+    mcts_root_dirichlet_noise: bool = True,
     mcts_root_dirichlet_epsilon: float = 0.25,
     mcts_root_dirichlet_alpha_total: float = 10.0,
     save_checkpoint_every_cycles: int = 0,
+    save_every_checkpoint: bool = False,
     checkpoint_dir: str = "nn_artifacts/checkpoints",
     benchmark_suite: bool = False,
     benchmark_games_per_opponent: int = 40,
-    benchmark_mcts_sims: int = 200,
-    champion_registry_path: str = "nn_artifacts/champions.json",
-    benchmark_seed: int | None = 42,
+    benchmark_mcts_sims: int = 64,
+    heuristic_eval_out_dir: str = "nn_artifacts/benchmark_eval",
+    champion_registry_dir: str = "nn_artifacts/champions/by_run",
+    benchmark_seed: int | None = None,
     resume_checkpoint: str | None = None,
     resume_run_id_suffix: str = "resume",
     resume_replay_path: str | None = None,
     auto_promote: bool = False,
-    promotion_games: int = 50,
-    promotion_threshold_winrate: float = 0.65,
+    promotion_games: int = 100,
+    promotion_threshold_winrate: float = 0.60,
     promotion_benchmark_mcts_sims: int | None = None,
     bootstrap_min_random_winrate: float = 0.75,
     rolling_replay: bool = False,
     replay_capacity: int = 50_000,
+    save_replay_buffer: bool = False,
     replay_save_every_cycles: int = 0,
     visualize: bool = False,
     viz_dir: str = "nn_artifacts/viz",
     viz_run_name: str | None = None,
+    viz_save_every_cycle: int = 1,
     collector_workers: int | None = None,
     benchmark_workers: int = 1,
 ) -> dict[str, object]:
@@ -1101,7 +1095,7 @@ def run_cycles(
         raise ValueError("collector_workers must be positive when provided")
     if benchmark_workers <= 0:
         raise ValueError("benchmark_workers must be positive")
-    _validate_collector_policy(collector_policy)
+    _require_mcts_collector_policy(collector_policy)
 
     resumed_from_metadata: dict[str, object] = {}
     resume_base_cycle_idx = 0
@@ -1110,10 +1104,11 @@ def run_cycles(
         loaded_ckpt = load_checkpoint_with_metadata(resume_checkpoint, device=device)
         model = loaded_ckpt.model.to(device)
         resume_base_cycle_idx = int(loaded_ckpt.cycle_idx)
-        resume_from_run_id = str(loaded_ckpt.run_id)
+        resume_from_run_id = str(loaded_ckpt.metadata.get("champion_lineage_run_id") or loaded_ckpt.run_id)
         resumed_from_metadata = {
             "resume_from_checkpoint_path": str(loaded_ckpt.path),
             "resume_from_run_id": loaded_ckpt.run_id,
+            "resume_from_lineage_run_id": resume_from_run_id,
             "resume_from_cycle_idx": float(loaded_ckpt.cycle_idx),
             "resume_from_created_at": loaded_ckpt.created_at,
         }
@@ -1141,6 +1136,13 @@ def run_cycles(
         temperature=0.0,
         root_dirichlet_noise=False,
     )
+    heuristic_eval_mcts_config = MCTSConfig(
+        num_simulations=int(HEURISTIC_EVAL_MCTS_SIMS),
+        c_puct=mcts_c_puct,
+        temperature_moves=0,
+        temperature=0.0,
+        root_dirichlet_noise=False,
+    )
     promotion_eval_sims = int(benchmark_mcts_sims if promotion_benchmark_mcts_sims is None else promotion_benchmark_mcts_sims)
     if promotion_eval_sims <= 0:
         raise ValueError("promotion_benchmark_mcts_sims must be positive")
@@ -1153,6 +1155,17 @@ def run_cycles(
     )
     base_run_id = f"train_{int(time.time())}_{int(seed)}"
     run_id = f"{base_run_id}_{resume_run_id_suffix}" if resume_checkpoint else base_run_id
+    champion_lineage_run_id, champion_registry_effective_path = _resolve_champion_lineage_registry_path(
+        run_id=run_id,
+        resume_from_run_id=resume_from_run_id,
+        champion_registry_dir=champion_registry_dir,
+    )
+    print(
+        "champion_lineage_config "
+        f"lineage_run_id={champion_lineage_run_id} "
+        f"registry={champion_registry_effective_path}"
+    )
+    heuristic_eval_path = Path(heuristic_eval_out_dir) / f"{_sanitize_run_id_for_filename(run_id)}_heuristic_eval.jsonl"
     effective_benchmark_seed = int(seed if benchmark_seed is None else benchmark_seed)
     effective_benchmark_workers = int(benchmark_workers)
     viz_logger = None
@@ -1162,7 +1175,7 @@ def run_cycles(
                 "Visualization dependencies unavailable. Install required packages: tensorboard and matplotlib."
             )
         run_name = str(viz_run_name) if viz_run_name else run_id
-        viz_save_stride = int(save_checkpoint_every_cycles) if int(save_checkpoint_every_cycles) > 0 else 1
+        viz_save_stride = int(viz_save_every_cycle) if int(viz_save_every_cycle) > 0 else 1
         viz_logger = MetricsVizLogger(
             mode="cycles",
             run_id=run_id,
@@ -1199,20 +1212,21 @@ def run_cycles(
     last_train_metrics: dict[str, object] = {}
     last_eval_metrics: dict[str, object] = {}
     last_benchmark_metrics: dict[str, object] = {}
+    last_heuristic_eval_metrics: dict[str, object] = {}
     last_promotion_metrics: dict[str, object] = {}
+    last_selfplay_source_mode = "learner_temp"
+    last_selfplay_source_checkpoint = ""
+    source_model_cache_path: str | None = None
+    source_model_cache: MaskedPolicyValueNet | None = None
     replay = ReplayBuffer(max_size=(replay_capacity if rolling_replay else None))
     auto_workers = int(os.cpu_count() or 1)
-    if collector_policy == "mcts":
-        requested_workers = int(collector_workers) if collector_workers is not None else auto_workers
-        configured_workers = _recommend_mcts_collector_workers(
-            requested_workers=int(requested_workers),
-            episodes_per_cycle=int(episodes_per_cycle),
-            max_turns=int(max_turns),
-            mcts_sims=int(mcts_sims),
-        )
-    else:
-        requested_workers = 1
-        configured_workers = 1
+    requested_workers = int(collector_workers) if collector_workers is not None else auto_workers
+    configured_workers = _recommend_mcts_collector_workers(
+        requested_workers=int(requested_workers),
+        episodes_per_cycle=int(episodes_per_cycle),
+        max_turns=int(max_turns),
+        mcts_sims=int(mcts_sims),
+    )
     replay_out_dir = Path("nn_artifacts/replay")
     rolling_replay_state_path = replay_out_dir / f"{run_id}_replay_latest.npz"
     last_saved_replay_path: Path | None = None
@@ -1237,7 +1251,7 @@ def run_cycles(
 
     pool_ctx = (
         SelfPlayWorkerPool(max_workers=int(configured_workers))
-        if collector_policy == "mcts" and configured_workers > 1
+        if configured_workers > 1
         else nullcontext(None)
     )
     with pool_ctx as parallel_worker_pool, SplendorNativeEnv() as env:
@@ -1249,17 +1263,54 @@ def run_cycles(
             )
             if not rolling_replay:
                 replay = ReplayBuffer()
+
+            selfplay_source_mode = "learner_temp"
+            selfplay_source_checkpoint = ""
+            selfplay_source_model: MaskedPolicyValueNet = model
+            checkpoint_path_override: str | None = None
+            champion_checkpoint = _load_current_champion_checkpoint_for_cycle(
+                champion_registry_path=champion_registry_effective_path,
+                cycle_idx=cycle_idx,
+                cycles=cycles,
+            )
+            if champion_checkpoint is not None:
+                selfplay_source_mode = "champion"
+                selfplay_source_checkpoint = champion_checkpoint
+                if configured_workers > 1:
+                    checkpoint_path_override = champion_checkpoint
+                else:
+                    try:
+                        if source_model_cache is None or source_model_cache_path != champion_checkpoint:
+                            source_model_cache = load_checkpoint(champion_checkpoint, device=device).to(device)
+                            source_model_cache_path = champion_checkpoint
+                        selfplay_source_model = source_model_cache
+                    except Exception as exc:
+                        print(
+                            f"cycle_selfplay_warning={cycle_idx}/{cycles} "
+                            f"champion_model_load_failed={exc}"
+                        )
+                        selfplay_source_mode = "learner_temp"
+                        selfplay_source_checkpoint = ""
+            print(
+                f"cycle_selfplay_source={cycle_idx}/{cycles} "
+                f"mode={selfplay_source_mode} "
+                f"checkpoint={selfplay_source_checkpoint if selfplay_source_checkpoint else 'learner_temp'}"
+            )
+            last_selfplay_source_mode = selfplay_source_mode
+            last_selfplay_source_checkpoint = selfplay_source_checkpoint
+
             replay_size_before_collect = len(replay)
-            if collector_policy == "mcts" and configured_workers > 1:
+            if configured_workers > 1:
                 collection_metrics = _collect_replay_parallel_mcts(
                     replay,
                     episodes=episodes_per_cycle,
                     max_turns=max_turns,
-                    model=model,
+                    model=selfplay_source_model,
                     seed_start=next_episode_seed,
                     mcts_config=mcts_config,
                     workers=min(int(configured_workers), int(episodes_per_cycle)),
                     worker_pool=parallel_worker_pool,
+                    checkpoint_path_override=checkpoint_path_override,
                 )
             else:
                 collection_metrics = _collect_replay(
@@ -1269,7 +1320,7 @@ def run_cycles(
                     max_turns=max_turns,
                     rng=rng,
                     collector_policy=collector_policy,
-                    model=model,
+                    model=selfplay_source_model,
                     device=device,
                     seed_start=next_episode_seed,
                     mcts_config=mcts_config,
@@ -1354,7 +1405,7 @@ def run_cycles(
 
             print(
                 f"cycle_summary={cycle_idx}/{cycles} "
-                f"collector_policy={collector_policy} "
+                f"collector_policy=mcts "
                 f"collector_workers_used={int(collection_metrics.get('collector_workers_used', 1.0))} "
                 f"collection_wall_sec={float(collection_metrics.get('collection_wall_sec', 0.0)):.3f} "
                 f"collection_steps_per_sec={float(collection_metrics.get('collection_steps_per_sec', 0.0)):.1f} "
@@ -1378,7 +1429,7 @@ def run_cycles(
                 f"eval_value_loss={eval_metrics['eval_value_loss']:.8f} "
                 f"eval_total_loss={eval_metrics['eval_total_loss']:.8f}"
             )
-            if collector_policy == "mcts" and float(collection_metrics["collector_mcts_actions"]) > 0:
+            if float(collection_metrics["collector_mcts_actions"]) > 0:
                 print(
                     f"cycle_mcts={cycle_idx}/{cycles} "
                     f"avg_search_ms={float(collection_metrics['mcts_avg_search_ms']):.3f} "
@@ -1388,36 +1439,56 @@ def run_cycles(
                     f"avg_root_value={float(collection_metrics['mcts_avg_root_value']):.4f}"
                 )
 
+            checkpoint_metadata = {
+                "seed": seed,
+                "collector_policy": "mcts",
+                "mcts_sims": mcts_sims,
+                "cycle_idx": global_cycle_idx,
+                "champion_lineage_run_id": champion_lineage_run_id,
+                "champion_registry_path_effective": str(champion_registry_effective_path),
+                **resumed_from_metadata,
+            }
             checkpoint_info = None
-            should_save_checkpoint_this_cycle = checkpoint_cycle
-            if should_save_checkpoint_this_cycle:
-                checkpoint_info = save_checkpoint(
-                    model,
-                    output_dir=checkpoint_dir,
-                    run_id=run_id,
-                    cycle_idx=global_cycle_idx,
-                    metadata={
-                        "seed": seed,
-                        "collector_policy": collector_policy,
-                        "mcts_sims": mcts_sims,
-                        "cycle_idx": global_cycle_idx,
-                        **resumed_from_metadata,
-                    },
-                )
-                print(f"cycle_checkpoint={cycle_idx}/{cycles} path={checkpoint_info.path}")
+            candidate_checkpoint_path: str | None = None
+            candidate_checkpoint_tmpdir: tempfile.TemporaryDirectory[str] | None = None
+            should_make_candidate_checkpoint = checkpoint_cycle and (
+                bool(save_every_checkpoint) or bool(benchmark_suite) or bool(auto_promote)
+            )
+            if should_make_candidate_checkpoint:
+                if save_every_checkpoint:
+                    checkpoint_info = save_checkpoint(
+                        model,
+                        output_dir=checkpoint_dir,
+                        run_id=run_id,
+                        cycle_idx=global_cycle_idx,
+                        metadata=checkpoint_metadata,
+                    )
+                    candidate_checkpoint_path = str(checkpoint_info.path)
+                    print(f"cycle_checkpoint={cycle_idx}/{cycles} path={checkpoint_info.path}")
+                else:
+                    candidate_checkpoint_tmpdir = tempfile.TemporaryDirectory(prefix="splendor_cycle_candidate_")
+                    checkpoint_info = save_checkpoint(
+                        model,
+                        output_dir=candidate_checkpoint_tmpdir.name,
+                        run_id=run_id,
+                        cycle_idx=global_cycle_idx,
+                        metadata=checkpoint_metadata,
+                    )
+                    candidate_checkpoint_path = str(checkpoint_info.path)
+                    print(f"cycle_checkpoint_temp={cycle_idx}/{cycles} path={checkpoint_info.path}")
 
             if benchmark_suite and checkpoint_cycle:
                 suite_opponents = [GreedyHeuristicOpponent(name="heuristic")]
-                if checkpoint_info is None:
+                if not candidate_checkpoint_path:
                     raise RuntimeError("Benchmark suite requires candidate checkpoint")
                 candidate_policy = CheckpointMCTSOpponent(
-                    checkpoint_path=str(checkpoint_info.path),
+                    checkpoint_path=str(candidate_checkpoint_path),
                     mcts_config=eval_mcts_config,
                     device=device,
                     name="candidate",
                 )
                 suite_result = run_benchmark_suite(
-                    candidate_checkpoint=str(checkpoint_info.path),
+                    candidate_checkpoint=str(candidate_checkpoint_path),
                     candidate_policy=candidate_policy,
                     suite_opponents=suite_opponents,
                     games_per_opponent=benchmark_games_per_opponent,
@@ -1433,7 +1504,7 @@ def run_cycles(
                     "benchmark_suite_candidate_losses": float(suite_result.suite_candidate_losses),
                     "benchmark_suite_draws": float(suite_result.suite_draws),
                     "benchmark_suite_avg_turns_per_game": float(suite_result.suite_avg_turns_per_game),
-                    "benchmark_candidate_checkpoint": suite_result.candidate_checkpoint,
+                    "benchmark_candidate_checkpoint": str(candidate_checkpoint_path),
                 }
             elif benchmark_suite:
                 print(
@@ -1443,37 +1514,93 @@ def run_cycles(
                     f"global_cycle={global_cycle_idx}"
                 )
 
+            try:
+                heuristic_candidate = ModelMCTSOpponent(
+                    model=model,
+                    mcts_config=heuristic_eval_mcts_config,
+                    device=device,
+                    name="candidate",
+                )
+                heuristic_opponent = GreedyHeuristicOpponent(name="heuristic")
+                heuristic_matchup = run_matchup(
+                    env,
+                    heuristic_candidate,
+                    heuristic_opponent,
+                    games=int(HEURISTIC_EVAL_GAMES),
+                    max_turns=int(max_turns),
+                    seed_base=int(effective_benchmark_seed + 2_000_000),
+                    cycle_idx=int(cycle_idx),
+                    parallel_workers=min(int(effective_benchmark_workers), int(HEURISTIC_EVAL_GAMES)),
+                )
+                print(
+                    f"cycle_heuristic_eval={cycle_idx}/{cycles} "
+                    f"games={heuristic_matchup.games} "
+                    f"wins={heuristic_matchup.candidate_wins} "
+                    f"losses={heuristic_matchup.candidate_losses} "
+                    f"draws={heuristic_matchup.draws} "
+                    f"win_rate={heuristic_matchup.candidate_win_rate:.3f} "
+                    f"nonloss_rate={heuristic_matchup.candidate_nonloss_rate:.3f} "
+                    f"avg_turns={heuristic_matchup.avg_turns_per_game:.2f}"
+                )
+                row = {
+                    "run_id": run_id,
+                    "lineage_run_id": champion_lineage_run_id,
+                    "cycle_idx": int(cycle_idx),
+                    "global_cycle_idx": int(global_cycle_idx),
+                    "games": int(heuristic_matchup.games),
+                    "mcts_sims": int(HEURISTIC_EVAL_MCTS_SIMS),
+                    "max_turns": int(max_turns),
+                    "wins": int(heuristic_matchup.candidate_wins),
+                    "losses": int(heuristic_matchup.candidate_losses),
+                    "draws": int(heuristic_matchup.draws),
+                    "win_rate": float(heuristic_matchup.candidate_win_rate),
+                    "nonloss_rate": float(heuristic_matchup.candidate_nonloss_rate),
+                    "avg_turns_per_game": float(heuristic_matchup.avg_turns_per_game),
+                    "cutoff_rate": float(heuristic_matchup.cutoff_rate),
+                }
+                _append_jsonl_row(heuristic_eval_path, row)
+                last_heuristic_eval_metrics = {
+                    "heuristic_eval_games": float(heuristic_matchup.games),
+                    "heuristic_eval_mcts_sims": float(HEURISTIC_EVAL_MCTS_SIMS),
+                    "heuristic_eval_win_rate": float(heuristic_matchup.candidate_win_rate),
+                    "heuristic_eval_nonloss_rate": float(heuristic_matchup.candidate_nonloss_rate),
+                    "heuristic_eval_avg_turns_per_game": float(heuristic_matchup.avg_turns_per_game),
+                    "heuristic_eval_cutoff_rate": float(heuristic_matchup.cutoff_rate),
+                }
+            except Exception as exc:
+                print(f"cycle_heuristic_eval_warning={cycle_idx}/{cycles} {exc}")
+                _append_jsonl_row(
+                    heuristic_eval_path,
+                    {
+                        "run_id": run_id,
+                        "lineage_run_id": champion_lineage_run_id,
+                        "cycle_idx": int(cycle_idx),
+                        "global_cycle_idx": int(global_cycle_idx),
+                        "games": int(HEURISTIC_EVAL_GAMES),
+                        "mcts_sims": int(HEURISTIC_EVAL_MCTS_SIMS),
+                        "max_turns": int(max_turns),
+                        "error": str(exc),
+                    },
+                )
+
             if auto_promote and checkpoint_cycle:
-                if checkpoint_info is None:
-                    checkpoint_info = save_checkpoint(
-                        model,
-                        output_dir=checkpoint_dir,
-                        run_id=run_id,
-                        cycle_idx=global_cycle_idx,
-                        metadata={
-                            "seed": seed,
-                            "collector_policy": collector_policy,
-                            "mcts_sims": mcts_sims,
-                            "cycle_idx": global_cycle_idx,
-                            **resumed_from_metadata,
-                        },
-                    )
-                    print(f"cycle_checkpoint={cycle_idx}/{cycles} path={checkpoint_info.path}")
+                if not candidate_checkpoint_path:
+                    raise RuntimeError("Auto-promotion requires candidate checkpoint")
                 promo_suite_opponents, has_current_champion = _build_suite_opponents_from_registry(
-                    champion_registry_path=champion_registry_path,
+                    champion_registry_path=str(champion_registry_effective_path),
                     eval_mcts_config=promotion_eval_mcts_config,
                     device=device,
                     cycle_idx=cycle_idx,
                     cycles=cycles,
                 )
                 promo_candidate_policy = CheckpointMCTSOpponent(
-                    checkpoint_path=str(checkpoint_info.path),
+                    checkpoint_path=str(candidate_checkpoint_path),
                     mcts_config=promotion_eval_mcts_config,
                     device=device,
                     name="candidate",
                 )
                 promo_suite = run_benchmark_suite(
-                    candidate_checkpoint=str(checkpoint_info.path),
+                    candidate_checkpoint=str(candidate_checkpoint_path),
                     candidate_policy=promo_candidate_policy,
                     suite_opponents=promo_suite_opponents,
                     games_per_opponent=promotion_games,
@@ -1504,11 +1631,25 @@ def run_cycles(
 
                 if should_promote:
                     try:
-                        registry = load_champion_registry(champion_registry_path)
+                        if not save_every_checkpoint:
+                            checkpoint_info = save_checkpoint(
+                                model,
+                                output_dir=checkpoint_dir,
+                                run_id=run_id,
+                                cycle_idx=global_cycle_idx,
+                                metadata=checkpoint_metadata,
+                            )
+                            candidate_checkpoint_path = str(checkpoint_info.path)
+                            print(f"cycle_checkpoint_champion={cycle_idx}/{cycles} path={checkpoint_info.path}")
+                        if checkpoint_info is None:
+                            raise RuntimeError("Promoted champion checkpoint missing")
+                        registry = load_champion_registry(champion_registry_effective_path)
                         promo_metrics = {
                             "promotion_games": int(promotion_games),
                             "promotion_threshold": float(promotion_threshold_winrate),
                             "promotion_reason": promote_reason,
+                            "promotion_eval_mcts_sims": int(promotion_eval_sims),
+                            "lineage_run_id": str(champion_lineage_run_id),
                             "suite_candidate_wins": int(promo_suite.suite_candidate_wins),
                             "suite_candidate_losses": int(promo_suite.suite_candidate_losses),
                             "suite_draws": int(promo_suite.suite_draws),
@@ -1520,17 +1661,18 @@ def run_cycles(
                         append_accepted_champion(
                             registry,
                             build_champion_entry_from_promotion(
-                                checkpoint_path=str(checkpoint_info.path),
-                                run_id=run_id,
+                                checkpoint_path=str(candidate_checkpoint_path),
+                                run_id=champion_lineage_run_id,
                                 cycle_idx=global_cycle_idx,
                                 metrics=promo_metrics,
                                 notes="auto-promote",
                             ),
                         )
-                        save_champion_registry(champion_registry_path, registry)
+                        save_champion_registry(champion_registry_effective_path, registry)
                         print(
                             f"cycle_promotion_registry_update={cycle_idx}/{cycles} "
-                            f"checkpoint={checkpoint_info.path}"
+                            f"registry={champion_registry_effective_path} "
+                            f"checkpoint={candidate_checkpoint_path}"
                         )
                     except Exception as exc:
                         should_promote = False
@@ -1543,7 +1685,8 @@ def run_cycles(
                     "promotion_reason": promote_reason,
                     "promotion_eval_games": float(promotion_games),
                     "promotion_threshold_winrate": float(promotion_threshold_winrate),
-                    "promotion_checkpoint": str(checkpoint_info.path),
+                    "promotion_eval_mcts_sims": float(promotion_eval_sims),
+                    "promotion_checkpoint": str(candidate_checkpoint_path) if candidate_checkpoint_path else "",
                 }
                 for k, v in promote_details.items():
                     if v is not None:
@@ -1555,6 +1698,9 @@ def run_cycles(
                     f"every={int(save_checkpoint_every_cycles)} "
                     f"global_cycle={global_cycle_idx}"
                 )
+
+            if candidate_checkpoint_tmpdir is not None:
+                candidate_checkpoint_tmpdir.cleanup()
 
             total_episodes += float(collection_metrics["episodes"])
             total_terminal_episodes += float(collection_metrics["terminal_episodes"])
@@ -1586,7 +1732,9 @@ def run_cycles(
             weighted_sum_eval_total_loss += float(eval_metrics["eval_total_loss"]) * cycle_eval_samples
 
             should_save_replay = False
-            if replay_save_every_cycles > 0 and (global_cycle_idx % replay_save_every_cycles == 0 or cycle_idx == cycles):
+            if save_replay_buffer and replay_save_every_cycles > 0 and (
+                global_cycle_idx % replay_save_every_cycles == 0 or cycle_idx == cycles
+            ):
                 should_save_replay = True
             if should_save_replay:
                 replay_out_dir.mkdir(parents=True, exist_ok=True)
@@ -1605,27 +1753,41 @@ def run_cycles(
     if total_train_steps <= 0:
         raise RuntimeError("No training steps executed in cycle run")
 
-    if replay_save_every_cycles > 0:
-        if last_saved_replay_path is None:
+    replay_state_path: Path | None = None
+    if save_replay_buffer:
+        if replay_save_every_cycles > 0:
+            if last_saved_replay_path is None:
+                replay_out_dir.mkdir(parents=True, exist_ok=True)
+                if rolling_replay_state_path.exists():
+                    rolling_replay_state_path.unlink()
+                last_saved_replay_path = replay.save_npz(rolling_replay_state_path)
+                print(f"replay_state_saved={last_saved_replay_path.resolve()} samples={len(replay)}")
+            replay_state_path = last_saved_replay_path
+        else:
             replay_out_dir.mkdir(parents=True, exist_ok=True)
-            if rolling_replay_state_path.exists():
-                rolling_replay_state_path.unlink()
-            last_saved_replay_path = replay.save_npz(rolling_replay_state_path)
-            print(f"replay_state_saved={last_saved_replay_path.resolve()} samples={len(replay)}")
-        replay_state_path = last_saved_replay_path
+            replay_file = replay_out_dir / f"{run_id}_cycle_{(resume_base_cycle_idx + cycles):04d}_replay.npz"
+            replay_state_path = replay.save_npz(replay_file)
+            print(f"replay_state_saved={replay_state_path.resolve()} samples={len(replay)}")
     else:
-        replay_out_dir.mkdir(parents=True, exist_ok=True)
-        replay_file = replay_out_dir / f"{run_id}_cycle_{(resume_base_cycle_idx + cycles):04d}_replay.npz"
-        replay_state_path = replay.save_npz(replay_file)
-        print(f"replay_state_saved={replay_state_path.resolve()} samples={len(replay)}")
+        print("replay_state_saved=disabled")
 
     result: dict[str, object] = {
         "mode": "cycles",
-        "collector_policy": collector_policy,
+        "collector_policy": "mcts",
+        "champion_lineage_run_id": champion_lineage_run_id,
+        "champion_registry_path_effective": str(champion_registry_effective_path.resolve()),
+        "heuristic_eval_artifact_path": str(heuristic_eval_path.resolve()),
+        "heuristic_eval_games_per_cycle": float(HEURISTIC_EVAL_GAMES),
+        "heuristic_eval_mcts_sims": float(HEURISTIC_EVAL_MCTS_SIMS),
+        "selfplay_source_mode": last_selfplay_source_mode,
+        "selfplay_source_checkpoint": last_selfplay_source_checkpoint,
+        "promotion_eval_mcts_sims": float(promotion_eval_sims),
         "collector_workers_requested": float(requested_workers),
         "collector_workers": float(configured_workers),
         "benchmark_workers": float(effective_benchmark_workers),
         "rolling_replay": float(1 if rolling_replay else 0),
+        "save_every_checkpoint": float(1 if save_every_checkpoint else 0),
+        "save_replay_buffer": float(1 if save_replay_buffer else 0),
         "replay_capacity": float(replay_capacity),
         "cycles": float(cycles),
         "episodes_per_cycle": float(episodes_per_cycle),
@@ -1654,7 +1816,7 @@ def run_cycles(
         "eval_avg_policy_loss": (weighted_sum_eval_policy_loss / total_eval_samples) if total_eval_samples > 0 else 0.0,
         "eval_avg_value_loss": (weighted_sum_eval_value_loss / total_eval_samples) if total_eval_samples > 0 else 0.0,
         "eval_avg_total_loss": (weighted_sum_eval_total_loss / total_eval_samples) if total_eval_samples > 0 else 0.0,
-        "replay_state_path": str(replay_state_path.resolve()),
+        "replay_state_path": str(replay_state_path.resolve()) if replay_state_path is not None else "",
         "replay_state_samples": float(len(replay)),
         "replay_save_every_cycles": float(replay_save_every_cycles),
     }
@@ -1673,6 +1835,8 @@ def run_cycles(
     )
     if last_benchmark_metrics:
         result.update(last_benchmark_metrics)
+    if last_heuristic_eval_metrics:
+        result.update(last_heuristic_eval_metrics)
     if resumed_from_metadata:
         result.update(resumed_from_metadata)
         result["resume_base_cycle_idx"] = float(resume_base_cycle_idx)
@@ -1693,7 +1857,7 @@ def run_checkpoint_benchmark(
     device: str = "cpu",
     max_turns: int = 80,
     benchmark_games_per_opponent: int = 40,
-    benchmark_mcts_sims: int = 200,
+    benchmark_mcts_sims: int = 64,
     mcts_c_puct: float = 1.25,
     champion_registry_path: str = "nn_artifacts/champions.json",
     benchmark_seed: int = 42,
@@ -1763,12 +1927,11 @@ def run_checkpoint_benchmark(
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Splendor NN smoke pipeline (random self-play + one train step)")
-    p.add_argument("--mode", type=str, choices=["smoke", "cycles", "benchmark"], default="smoke")
+    p = argparse.ArgumentParser(description="Splendor NN training/eval pipeline")
+    p.add_argument("--mode", type=str, choices=["smoke", "cycles", "benchmark"], default="cycles")
     p.add_argument("--episodes", type=int, default=5)
     p.add_argument("--max-turns", type=int, default=80)
-    p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--collector-policy", type=str, choices=["random", "model-sample", "mcts"], default="random")
+    p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--train-steps", type=int, default=1)
     p.add_argument("--cycles", type=int, default=3)
     p.add_argument("--episodes-per-cycle", type=int, default=5)
@@ -1782,34 +1945,37 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--mcts-c-puct", type=float, default=1.25)
     p.add_argument("--mcts-temperature-moves", type=int, default=10)
     p.add_argument("--mcts-temperature", type=float, default=1.0)
-    p.add_argument("--mcts-root-dirichlet-noise", action="store_true")
+    p.add_argument("--mcts-root-dirichlet-noise", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--mcts-root-dirichlet-epsilon", type=float, default=0.25)
     p.add_argument("--mcts-root-dirichlet-alpha-total", type=float, default=10.0)
     p.add_argument("--candidate-checkpoint", type=str, default=None)
     p.add_argument("--save-checkpoint-every-cycles", type=int, default=0)
+    p.add_argument("--save-every-checkpoint", action="store_true")
     p.add_argument("--checkpoint-dir", type=str, default="nn_artifacts/checkpoints")
     p.add_argument("--benchmark-suite", action="store_true")
     p.add_argument("--benchmark-games-per-opponent", type=int, default=40)
-    p.add_argument("--benchmark-mcts-sims", type=int, default=200)
+    p.add_argument("--benchmark-mcts-sims", type=int, default=64)
+    p.add_argument("--heuristic-eval-out-dir", type=str, default="nn_artifacts/benchmark_eval")
+    p.add_argument("--champion-registry-dir", type=str, default="nn_artifacts/champions/by_run")
     p.add_argument("--champion-registry-path", type=str, default="nn_artifacts/champions.json")
-    p.add_argument("--benchmark-seed", type=int, default=42)
+    p.add_argument("--benchmark-seed", type=int, default=None)
     p.add_argument("--benchmark-cycle-idx", type=int, default=0)
     p.add_argument("--resume-checkpoint", type=str, default=None)
     p.add_argument("--resume-run-id-suffix", type=str, default="resume")
     p.add_argument("--resume-replay-path", type=str, default=None)
     p.add_argument("--auto-promote", action="store_true")
-    p.add_argument("--promotion-games", type=int, default=50)
-    p.add_argument("--promotion-threshold-winrate", type=float, default=0.65)
+    p.add_argument("--promotion-games", type=int, default=100)
+    p.add_argument("--promotion-threshold-winrate", type=float, default=0.60)
     p.add_argument("--promotion-benchmark-mcts-sims", type=int, default=None)
     p.add_argument("--bootstrap-min-random-winrate", type=float, default=0.75)
     p.add_argument("--rolling-replay", action="store_true")
     p.add_argument("--replay-capacity", type=int, default=50000)
+    p.add_argument("--save-replay-buffer", action="store_true")
     p.add_argument("--replay-save-every-cycles", type=int, default=0)
     p.add_argument("--visualize", action="store_true")
     p.add_argument("--viz-dir", type=str, default="nn_artifacts/viz")
     p.add_argument("--viz-run-name", type=str, default=None)
     p.add_argument("--viz-save-every-cycle", type=int, default=1)
-    p.add_argument("--viz-smoke-enable", action="store_true")
     p.add_argument("--collector-workers", type=int, default=None)
     p.add_argument("--benchmark-workers", type=int, default=1)
     return p
@@ -1822,7 +1988,6 @@ def main() -> None:
             episodes=args.episodes,
             max_turns=args.max_turns,
             batch_size=args.batch_size,
-            collector_policy=args.collector_policy,
             train_steps=args.train_steps,
             log_every=args.log_every,
             lr=args.lr,
@@ -1840,7 +2005,6 @@ def main() -> None:
             viz_dir=args.viz_dir,
             viz_run_name=args.viz_run_name,
             viz_save_every_cycle=args.viz_save_every_cycle,
-            viz_smoke_enable=args.viz_smoke_enable,
         )
     elif args.mode == "cycles":
         metrics = run_cycles(
@@ -1849,7 +2013,6 @@ def main() -> None:
             train_steps_per_cycle=args.train_steps_per_cycle,
             max_turns=args.max_turns,
             batch_size=args.batch_size,
-            collector_policy=args.collector_policy,
             log_every=args.log_every,
             lr=args.lr,
             weight_decay=args.weight_decay,
@@ -1863,11 +2026,13 @@ def main() -> None:
             mcts_root_dirichlet_epsilon=args.mcts_root_dirichlet_epsilon,
             mcts_root_dirichlet_alpha_total=args.mcts_root_dirichlet_alpha_total,
             save_checkpoint_every_cycles=args.save_checkpoint_every_cycles,
+            save_every_checkpoint=args.save_every_checkpoint,
             checkpoint_dir=args.checkpoint_dir,
             benchmark_suite=args.benchmark_suite,
             benchmark_games_per_opponent=args.benchmark_games_per_opponent,
             benchmark_mcts_sims=args.benchmark_mcts_sims,
-            champion_registry_path=args.champion_registry_path,
+            heuristic_eval_out_dir=args.heuristic_eval_out_dir,
+            champion_registry_dir=args.champion_registry_dir,
             benchmark_seed=args.benchmark_seed,
             resume_checkpoint=args.resume_checkpoint,
             resume_run_id_suffix=args.resume_run_id_suffix,
@@ -1879,10 +2044,12 @@ def main() -> None:
             bootstrap_min_random_winrate=args.bootstrap_min_random_winrate,
             rolling_replay=args.rolling_replay,
             replay_capacity=args.replay_capacity,
+            save_replay_buffer=args.save_replay_buffer,
             replay_save_every_cycles=args.replay_save_every_cycles,
             visualize=args.visualize,
             viz_dir=args.viz_dir,
             viz_run_name=args.viz_run_name,
+            viz_save_every_cycle=args.viz_save_every_cycle,
             collector_workers=args.collector_workers,
             benchmark_workers=args.benchmark_workers,
         )

@@ -7,8 +7,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 
+from .model import MaskedPolicyValueNet
 from .native_env import SplendorNativeEnv
-from .opponents import CheckpointMCTSOpponent, GreedyHeuristicOpponent, RandomOpponent
+from .opponents import CheckpointMCTSOpponent, GreedyHeuristicOpponent, ModelMCTSOpponent, RandomOpponent
 
 
 @dataclass
@@ -274,6 +275,26 @@ def _policy_to_spec(policy: Any) -> dict[str, Any]:
         return {"kind": "random", "name": str(policy.name)}
     if isinstance(policy, GreedyHeuristicOpponent):
         return {"kind": "heuristic", "name": str(policy.name)}
+    if isinstance(policy, ModelMCTSOpponent):
+        model = policy.model
+        if not hasattr(model, "state_dict"):
+            raise TypeError(f"ModelMCTSOpponent model does not expose state_dict(): {type(model)}")
+        # Convert params to CPU tensors for process-safe transport.
+        model_state_dict = {}
+        for key, tensor in model.state_dict().items():
+            model_state_dict[str(key)] = tensor.detach().cpu()
+        return {
+            "kind": "model_mcts",
+            "name": str(policy.name),
+            "model_state_dict": model_state_dict,
+            "model_kwargs": {
+                "input_dim": int(getattr(model.trunk[0], "in_features", 246)),
+                "hidden_dim": int(getattr(model.trunk[0], "out_features", 256)),
+                "action_dim": int(getattr(model.policy_head, "out_features", 69)),
+            },
+            "mcts_config": policy.mcts_config,
+            "device": str(policy.device),
+        }
     if isinstance(policy, CheckpointMCTSOpponent):
         return {
             "kind": "checkpoint_mcts",
@@ -291,6 +312,20 @@ def _policy_from_spec(spec: dict[str, Any]) -> Any:
         return RandomOpponent(name=str(spec.get("name", "random")))
     if kind == "heuristic":
         return GreedyHeuristicOpponent(name=str(spec.get("name", "heuristic")))
+    if kind == "model_mcts":
+        model_kwargs = dict(spec.get("model_kwargs") or {})
+        model = MaskedPolicyValueNet(**model_kwargs)
+        state_dict = spec.get("model_state_dict")
+        if not isinstance(state_dict, dict):
+            raise ValueError("model_mcts spec missing model_state_dict")
+        model.load_state_dict(state_dict)
+        model.eval()
+        return ModelMCTSOpponent(
+            model=model,
+            mcts_config=spec.get("mcts_config"),
+            device=str(spec.get("device", "cpu")),
+            name=str(spec.get("name", "mcts_model")),
+        )
     if kind == "checkpoint_mcts":
         return CheckpointMCTSOpponent(
             checkpoint_path=str(spec.get("checkpoint_path", "")),
