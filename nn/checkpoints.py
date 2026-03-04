@@ -46,7 +46,15 @@ def _load_checkpoint_payload(path: str | Path, *, device: str = "cpu") -> tuple[
 
 
 def _build_model_from_payload(payload: dict[str, Any], *, device: str = "cpu") -> MaskedPolicyValueNet:
-    model_kwargs = dict(payload.get("model_kwargs") or {})
+    raw_model_kwargs = payload.get("model_kwargs")
+    if not isinstance(raw_model_kwargs, dict):
+        raise ValueError("Checkpoint missing model_kwargs")
+    model_kwargs = dict(raw_model_kwargs)
+    if "res_blocks" not in model_kwargs:
+        raise ValueError(
+            "Checkpoint missing model_kwargs.res_blocks. "
+            "Older checkpoints are intentionally unsupported after ResBlock rollout."
+        )
     model = MaskedPolicyValueNet(**model_kwargs).to(device)
     state_dict = payload.get("model_state_dict")
     if not isinstance(state_dict, dict):
@@ -85,11 +93,7 @@ def save_checkpoint(
 
     payload = {
         "model_state_dict": model.state_dict(),
-        "model_kwargs": {
-            "input_dim": int(getattr(model.trunk[0], "in_features", 246)),
-            "hidden_dim": int(getattr(model.trunk[0], "out_features", 256)),
-            "action_dim": int(getattr(model.policy_head, "out_features", 69)),
-        },
+        "model_kwargs": model.export_model_kwargs(),
         "metadata": dict(metadata),
         "run_id": str(run_id),
         "cycle_idx": int(cycle_idx),

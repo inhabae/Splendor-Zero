@@ -911,6 +911,8 @@ def run_smoke(
     episodes: int = 5,
     max_turns: int = 80,
     batch_size: int = 256,
+    model_hidden_dim: int = 256,
+    model_res_blocks: int = 0,
     collector_policy: str | None = None,
     train_steps: int = 1,
     log_every: int = 10,
@@ -936,6 +938,10 @@ def run_smoke(
 
     if episodes <= 0:
         raise ValueError("episodes must be positive")
+    if model_hidden_dim <= 0:
+        raise ValueError("model_hidden_dim must be positive")
+    if model_res_blocks < 0:
+        raise ValueError("model_res_blocks must be >= 0")
     _require_mcts_collector_policy(collector_policy)
 
     replay = ReplayBuffer()
@@ -950,7 +956,7 @@ def run_smoke(
         root_dirichlet_alpha_total=mcts_root_dirichlet_alpha_total,
     )
 
-    model = MaskedPolicyValueNet().to(device)
+    model = MaskedPolicyValueNet(hidden_dim=model_hidden_dim, res_blocks=model_res_blocks).to(device)
     run_id = f"smoke_{int(time.time())}_{int(seed)}"
     do_viz = bool(visualize)
     viz_logger = None
@@ -1122,6 +1128,8 @@ def run_smoke(
             "avg_turns_per_episode": _avg_or_zero(float(collection_metrics["total_turns"]), float(collection_metrics["episodes"])),
             "avg_steps_per_episode": _avg_or_zero(float(collection_metrics["total_steps"]), float(collection_metrics["episodes"])),
             "avg_steps_per_turn": _avg_or_zero(float(collection_metrics["total_steps"]), float(collection_metrics["total_turns"])),
+            "model_hidden_dim": float(getattr(model, "hidden_dim", model_hidden_dim)),
+            "model_res_blocks": float(getattr(model, "res_blocks", model_res_blocks)),
         }
     )
     return metrics
@@ -1134,6 +1142,8 @@ def run_cycles(
     train_steps_per_cycle: int = 50,
     max_turns: int = 80,
     batch_size: int = 256,
+    model_hidden_dim: int = 256,
+    model_res_blocks: int = 0,
     collector_policy: str | None = None,
     log_every: int = 10,
     lr: float = 3e-4,
@@ -1206,6 +1216,10 @@ def run_cycles(
         raise ValueError("bootstrap_min_random_winrate must be in [0,1]")
     if replay_capacity <= 0:
         raise ValueError("replay_capacity must be positive")
+    if model_hidden_dim <= 0:
+        raise ValueError("model_hidden_dim must be positive")
+    if model_res_blocks < 0:
+        raise ValueError("model_res_blocks must be >= 0")
     if replay_save_every_cycles < 0:
         raise ValueError("replay_save_every_cycles must be >= 0")
     if collector_workers is not None and int(collector_workers) <= 0:
@@ -1236,7 +1250,9 @@ def run_cycles(
         if resume_base_cycle_idx <= 0:
             print(f"resume_warning=missing_or_zero_cycle_idx checkpoint={loaded_ckpt.path}")
     else:
-        model = MaskedPolicyValueNet().to(device)
+        model = MaskedPolicyValueNet(hidden_dim=model_hidden_dim, res_blocks=model_res_blocks).to(device)
+    effective_model_hidden_dim = int(getattr(model, "hidden_dim", model_hidden_dim))
+    effective_model_res_blocks = int(getattr(model, "res_blocks", model_res_blocks))
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     rng = random.Random(seed)
@@ -2154,6 +2170,8 @@ def run_cycles(
         "timing_last_checkpoint_save_sec": float(last_cycle_timing.get("checkpoint_save_sec", 0.0)),
         "timing_last_replay_save_sec": float(last_cycle_timing.get("replay_save_sec", 0.0)),
         "timing_last_other_wall_sec": float(last_cycle_timing.get("other_wall_sec", 0.0)),
+        "model_hidden_dim": float(effective_model_hidden_dim),
+        "model_res_blocks": float(effective_model_res_blocks),
     }
     result.update(
         {
@@ -2267,6 +2285,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--episodes", type=int, default=5)
     p.add_argument("--max-turns", type=int, default=80)
     p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--model-hidden-dim", type=int, default=256)
+    p.add_argument("--model-res-blocks", type=int, default=0)
     p.add_argument("--train-steps", type=int, default=1)
     p.add_argument("--cycles", type=int, default=3)
     p.add_argument("--episodes-per-cycle", type=int, default=5)
@@ -2328,6 +2348,8 @@ def main() -> None:
             episodes=args.episodes,
             max_turns=args.max_turns,
             batch_size=args.batch_size,
+            model_hidden_dim=args.model_hidden_dim,
+            model_res_blocks=args.model_res_blocks,
             train_steps=args.train_steps,
             log_every=args.log_every,
             lr=args.lr,
@@ -2353,6 +2375,8 @@ def main() -> None:
             train_steps_per_cycle=args.train_steps_per_cycle,
             max_turns=args.max_turns,
             batch_size=args.batch_size,
+            model_hidden_dim=args.model_hidden_dim,
+            model_res_blocks=args.model_res_blocks,
             log_every=args.log_every,
             lr=args.lr,
             weight_decay=args.weight_decay,

@@ -15,6 +15,13 @@ from .state_schema import ACTION_DIM, STATE_DIM
 _NATIVE_MODULE: Any | None = None
 _NATIVE_MODULE_LOAD_ATTEMPTED = False
 _NATIVE_OPT_WARNING_EMITTED = False
+_REQUIRED_NATIVE_ENV_METHODS = (
+    "reset",
+    "get_state",
+    "step",
+    "run_mcts",
+    "heuristic_action",
+)
 
 
 @dataclass
@@ -32,37 +39,50 @@ def _try_load_native_module() -> Any | None:
         return _NATIVE_MODULE
     _NATIVE_MODULE_LOAD_ATTEMPTED = True
 
-    try:
-        _NATIVE_MODULE = importlib.import_module("splendor_native")
-        return _NATIVE_MODULE
-    except Exception:
-        pass
-
     repo_root = Path(__file__).resolve().parents[1]
     build_dir = repo_root / "build"
-    if not build_dir.exists():
-        return None
 
     # Try to load the compiled native module from the build directory.
     # Use recursive search so multi-config generators (e.g. Visual Studio on Windows)
     # can load from build/Release or build/Debug without extra copying.
     patterns = ("splendor_native*.so", "splendor_native*.pyd", "splendor_native*.dylib")
-    for pattern in patterns:
-        for candidate in sorted(build_dir.rglob(pattern)):
-            spec = importlib.util.spec_from_file_location("splendor_native", candidate)
-            if spec is None or spec.loader is None:
-                continue
-            module = importlib.util.module_from_spec(spec)
-            sys.modules["splendor_native"] = module
-            try:
-                spec.loader.exec_module(module)
-            except Exception:
+    if build_dir.exists():
+        for pattern in patterns:
+            for candidate in sorted(build_dir.rglob(pattern)):
+                spec = importlib.util.spec_from_file_location("splendor_native", candidate)
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                sys.modules["splendor_native"] = module
+                try:
+                    spec.loader.exec_module(module)
+                except Exception:
+                    sys.modules.pop("splendor_native", None)
+                    continue
+                if _is_native_module_compatible(module):
+                    _NATIVE_MODULE = module
+                    return _NATIVE_MODULE
                 sys.modules.pop("splendor_native", None)
-                continue
-            _NATIVE_MODULE = module
-            return _NATIVE_MODULE
+
+    try:
+        module = importlib.import_module("splendor_native")
+    except Exception:
+        return None
+    if _is_native_module_compatible(module):
+        _NATIVE_MODULE = module
+        return _NATIVE_MODULE
 
     return None
+
+
+def _is_native_module_compatible(module: Any) -> bool:
+    env_cls = getattr(module, "NativeEnv", None)
+    if env_cls is None:
+        return False
+    for method_name in _REQUIRED_NATIVE_ENV_METHODS:
+        if not hasattr(env_cls, method_name):
+            return False
+    return True
 
 
 def _native_optimization_warning(native: Any) -> str | None:

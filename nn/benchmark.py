@@ -330,6 +330,8 @@ def _policy_to_spec(policy: Any) -> dict[str, Any]:
         model = policy.model
         if not hasattr(model, "state_dict"):
             raise TypeError(f"ModelMCTSOpponent model does not expose state_dict(): {type(model)}")
+        if not hasattr(model, "export_model_kwargs"):
+            raise TypeError(f"ModelMCTSOpponent model does not expose export_model_kwargs(): {type(model)}")
         # Convert params to CPU tensors for process-safe transport.
         model_state_dict = {}
         for key, tensor in model.state_dict().items():
@@ -339,11 +341,7 @@ def _policy_to_spec(policy: Any) -> dict[str, Any]:
             "name": str(policy.name),
             "model_state_dict": model_state_dict,
             "model_state_digest": _state_dict_digest(model_state_dict),
-            "model_kwargs": {
-                "input_dim": int(getattr(model.trunk[0], "in_features", 246)),
-                "hidden_dim": int(getattr(model.trunk[0], "out_features", 256)),
-                "action_dim": int(getattr(model.policy_head, "out_features", 69)),
-            },
+            "model_kwargs": dict(model.export_model_kwargs()),
             "mcts_config": policy.mcts_config,
             "device": str(policy.device),
         }
