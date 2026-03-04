@@ -308,11 +308,15 @@ def _run_selfplay_worker_task(
     num_simulations: int,
     seed_base: int,
 ) -> dict[str, Any]:
+    worker_t0 = time.perf_counter()
     # Avoid mutating parent-process BLAS/PyTorch thread settings when this code
     # is executed inline (workers_used == 1 fast path).
     if mp.current_process().name != "MainProcess":
         _configure_worker_runtime()
+    model_t0 = time.perf_counter()
     model = load_checkpoint(checkpoint_path, device="cpu")
+    model_elapsed = time.perf_counter() - model_t0
+    selfplay_t0 = time.perf_counter()
     with SplendorNativeEnv() as env:
         session = run_selfplay_session(
             env=env,
@@ -322,12 +326,22 @@ def _run_selfplay_worker_task(
             num_simulations=int(num_simulations),
             seed_base=int(seed_base + episode_start_idx),
         )
+    selfplay_elapsed = time.perf_counter() - selfplay_t0
+    pack_t0 = time.perf_counter()
     packed_steps = _pack_steps(session.steps, episode_offset=int(episode_start_idx))
+    pack_elapsed = time.perf_counter() - pack_t0
+    worker_elapsed = time.perf_counter() - worker_t0
     return {
         "worker_idx": int(worker_idx),
         "episode_start_idx": int(episode_start_idx),
         "games": int(games_for_worker),
         "steps_packed": packed_steps,
+        "worker_timing": {
+            "worker_model_load_sec": float(model_elapsed),
+            "worker_selfplay_sec": float(selfplay_elapsed),
+            "worker_pack_sec": float(pack_elapsed),
+            "worker_total_sec": float(worker_elapsed),
+        },
     }
 
 
@@ -504,8 +518,19 @@ def _run_selfplay_session_parallel_impl(
                 raise RuntimeError(f"self-play worker {worker_idx} failed") from exc
 
     all_steps: list[SelfPlayStep] = []
+    worker_timing_rows: list[dict[str, float]] = []
     for worker_idx in sorted(by_worker_idx):
         payload = by_worker_idx[worker_idx]
+        timing_payload = payload.get("worker_timing")
+        if isinstance(timing_payload, dict):
+            worker_timing_rows.append(
+                {
+                    "worker_model_load_sec": float(timing_payload.get("worker_model_load_sec", 0.0)),
+                    "worker_selfplay_sec": float(timing_payload.get("worker_selfplay_sec", 0.0)),
+                    "worker_pack_sec": float(timing_payload.get("worker_pack_sec", 0.0)),
+                    "worker_total_sec": float(timing_payload.get("worker_total_sec", 0.0)),
+                }
+            )
         packed_steps = payload.get("steps_packed")
         if packed_steps is not None:
             steps = _unpack_steps(packed_steps)
@@ -514,6 +539,24 @@ def _run_selfplay_session_parallel_impl(
             steps = payload.get("steps") or []
         all_steps.extend(steps)
     all_steps.sort(key=lambda step: (int(step.episode_idx), int(step.step_idx)))
+
+    def _series_stats(values: list[float]) -> tuple[float, float, float]:
+        if not values:
+            return 0.0, 0.0, 0.0
+        return (
+            float(sum(values) / len(values)),
+            float(min(values)),
+            float(max(values)),
+        )
+
+    model_values = [float(row["worker_model_load_sec"]) for row in worker_timing_rows]
+    selfplay_values = [float(row["worker_selfplay_sec"]) for row in worker_timing_rows]
+    pack_values = [float(row["worker_pack_sec"]) for row in worker_timing_rows]
+    total_values = [float(row["worker_total_sec"]) for row in worker_timing_rows]
+    model_mean, model_min, model_max = _series_stats(model_values)
+    selfplay_mean, selfplay_min, selfplay_max = _series_stats(selfplay_values)
+    pack_mean, pack_min, pack_max = _series_stats(pack_values)
+    total_mean, total_min, total_max = _series_stats(total_values)
 
     metadata = {
         "session_id": session_id,
@@ -526,6 +569,19 @@ def _run_selfplay_session_parallel_impl(
         "workers_used": int(workers_used),
         "parallelism_mode": "process_pool_persistent" if using_external_executor else "process_pool",
         "games_per_worker": [int(x) for x in games_per_worker],
+        "worker_timing_count": int(len(worker_timing_rows)),
+        "worker_model_load_sec_mean": float(model_mean),
+        "worker_model_load_sec_min": float(model_min),
+        "worker_model_load_sec_max": float(model_max),
+        "worker_selfplay_sec_mean": float(selfplay_mean),
+        "worker_selfplay_sec_min": float(selfplay_min),
+        "worker_selfplay_sec_max": float(selfplay_max),
+        "worker_pack_sec_mean": float(pack_mean),
+        "worker_pack_sec_min": float(pack_min),
+        "worker_pack_sec_max": float(pack_max),
+        "worker_total_sec_mean": float(total_mean),
+        "worker_total_sec_min": float(total_min),
+        "worker_total_sec_max": float(total_max),
     }
     return SelfPlaySession(
         session_id=session_id,

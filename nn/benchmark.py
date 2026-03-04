@@ -3,13 +3,17 @@ from __future__ import annotations
 import hashlib
 import multiprocessing as mp
 import random
+from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any
 
 from .model import MaskedPolicyValueNet
 from .native_env import SplendorNativeEnv
 from .opponents import CheckpointMCTSOpponent, GreedyHeuristicOpponent, ModelMCTSOpponent, RandomOpponent
+
+_POLICY_CACHE_MAX_ENTRIES = 16
+_POLICY_SPEC_CACHE: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
 
 
 @dataclass
@@ -60,6 +64,17 @@ def _safe_avg(values: list[int]) -> float | None:
     if not values:
         return None
     return float(sum(values) / len(values))
+
+
+def _recommend_benchmark_workers(*, requested_workers: int, games: int, max_workers: int | None = None) -> int:
+    workers_cap = int(requested_workers) if max_workers is None else int(max_workers)
+    workers = max(1, min(int(requested_workers), int(games), int(workers_cap)))
+    if workers <= 1:
+        return 1
+    # Avoid over-partitioning tiny batches where IPC/spawn dominates useful work.
+    if int(games) < workers * 2:
+        workers = max(1, int(games) // 2)
+    return max(1, min(int(workers), int(games)))
 
 
 def play_game(
@@ -114,6 +129,8 @@ def run_matchup(
     seed_base: int,
     cycle_idx: int,
     parallel_workers: int = 1,
+    executor: ProcessPoolExecutor | None = None,
+    max_workers: int | None = None,
 ) -> MatchupResult:
     if games <= 0:
         raise ValueError("games must be positive")
@@ -129,7 +146,11 @@ def run_matchup(
     turns_losses: list[int] = []
     turns_draws: list[int] = []
 
-    workers_used = max(1, min(int(parallel_workers), int(games)))
+    workers_used = _recommend_benchmark_workers(
+        requested_workers=int(parallel_workers),
+        games=int(games),
+        max_workers=(None if max_workers is None else int(max_workers)),
+    )
     if workers_used == 1:
         for game_idx in range(games):
             candidate_seat = 0 if game_idx < seat0_games else 1
@@ -169,9 +190,35 @@ def run_matchup(
             spans.append((start, end))
             start = end
 
-        with ProcessPoolExecutor(max_workers=workers_used, mp_context=mp.get_context("spawn")) as ex:
+        if executor is None:
+            with ProcessPoolExecutor(max_workers=workers_used, mp_context=mp.get_context("spawn")) as ex:
+                futures = [
+                    ex.submit(
+                        _run_matchup_worker_span,
+                        candidate_spec=candidate_spec,
+                        opponent_spec=opponent_spec,
+                        game_start=s,
+                        game_end=e,
+                        seat0_games=seat0_games,
+                        max_turns=max_turns,
+                        seed_base=seed_base,
+                        cycle_idx=cycle_idx,
+                    )
+                    for s, e in spans
+                ]
+                for fut in as_completed(futures):
+                    part = fut.result()
+                    candidate_wins += int(part["candidate_wins"])
+                    candidate_losses += int(part["candidate_losses"])
+                    draws += int(part["draws"])
+                    cutoffs += int(part["cutoffs"])
+                    turns_all.extend(int(x) for x in part["turns_all"])
+                    turns_wins.extend(int(x) for x in part["turns_wins"])
+                    turns_losses.extend(int(x) for x in part["turns_losses"])
+                    turns_draws.extend(int(x) for x in part["turns_draws"])
+        else:
             futures = [
-                ex.submit(
+                executor.submit(
                     _run_matchup_worker_span,
                     candidate_spec=candidate_spec,
                     opponent_spec=opponent_spec,
@@ -223,6 +270,8 @@ def run_benchmark_suite(
     seed_base: int = 0,
     cycle_idx: int = 0,
     parallel_workers: int = 1,
+    executor: ProcessPoolExecutor | None = None,
+    max_workers: int | None = None,
 ) -> BenchmarkSuiteResult:
     matchups: list[MatchupResult] = []
     warnings: list[str] = []
@@ -239,6 +288,8 @@ def run_benchmark_suite(
                     seed_base=seed_base,
                     cycle_idx=cycle_idx,
                     parallel_workers=parallel_workers,
+                    executor=executor,
+                    max_workers=max_workers,
                 )
                 matchups.append(matchup)
             except Exception as exc:
@@ -287,6 +338,7 @@ def _policy_to_spec(policy: Any) -> dict[str, Any]:
             "kind": "model_mcts",
             "name": str(policy.name),
             "model_state_dict": model_state_dict,
+            "model_state_digest": _state_dict_digest(model_state_dict),
             "model_kwargs": {
                 "input_dim": int(getattr(model.trunk[0], "in_features", 246)),
                 "hidden_dim": int(getattr(model.trunk[0], "out_features", 256)),
@@ -336,6 +388,62 @@ def _policy_from_spec(spec: dict[str, Any]) -> Any:
     raise ValueError(f"Unknown policy spec kind: {kind}")
 
 
+def _state_dict_digest(state_dict: dict[str, Any]) -> str:
+    digest = hashlib.sha256()
+    for key in sorted(state_dict.keys()):
+        tensor = state_dict[key]
+        tensor_cpu = tensor.detach().cpu().contiguous()
+        digest.update(str(key).encode("utf-8"))
+        digest.update(str(tensor_cpu.dtype).encode("utf-8"))
+        digest.update(str(tuple(tensor_cpu.shape)).encode("utf-8"))
+        digest.update(tensor_cpu.numpy().tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _freeze_for_cache(value: Any) -> Any:
+    if is_dataclass(value):
+        value = asdict(value)
+    if isinstance(value, dict):
+        return tuple((str(k), _freeze_for_cache(v)) for k, v in sorted(value.items(), key=lambda item: str(item[0])))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_for_cache(v) for v in value)
+    if isinstance(value, set):
+        return tuple(sorted(_freeze_for_cache(v) for v in value))
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    return repr(value)
+
+
+def _policy_cache_key(spec: dict[str, Any]) -> tuple[Any, ...]:
+    kind = str(spec.get("kind", ""))
+    key_parts: list[tuple[str, Any]] = [
+        ("kind", kind),
+        ("name", str(spec.get("name", ""))),
+        ("device", str(spec.get("device", "cpu"))),
+        ("mcts_config", _freeze_for_cache(spec.get("mcts_config"))),
+    ]
+    if kind == "checkpoint_mcts":
+        key_parts.append(("checkpoint_path", str(spec.get("checkpoint_path", ""))))
+    elif kind == "model_mcts":
+        key_parts.append(("model_state_digest", str(spec.get("model_state_digest", ""))))
+        key_parts.append(("model_kwargs", _freeze_for_cache(spec.get("model_kwargs"))))
+    return tuple(key_parts)
+
+
+def _policy_from_spec_cached(spec: dict[str, Any]) -> Any:
+    key = _policy_cache_key(spec)
+    cached = _POLICY_SPEC_CACHE.get(key)
+    if cached is not None:
+        _POLICY_SPEC_CACHE.move_to_end(key)
+        return cached
+    policy = _policy_from_spec(spec)
+    _POLICY_SPEC_CACHE[key] = policy
+    _POLICY_SPEC_CACHE.move_to_end(key)
+    while len(_POLICY_SPEC_CACHE) > int(_POLICY_CACHE_MAX_ENTRIES):
+        _POLICY_SPEC_CACHE.popitem(last=False)
+    return policy
+
+
 def _run_matchup_worker_span(
     *,
     candidate_spec: dict[str, Any],
@@ -347,8 +455,8 @@ def _run_matchup_worker_span(
     seed_base: int,
     cycle_idx: int,
 ) -> dict[str, Any]:
-    candidate_policy = _policy_from_spec(candidate_spec)
-    opponent_policy = _policy_from_spec(opponent_spec)
+    candidate_policy = _policy_from_spec_cached(candidate_spec)
+    opponent_policy = _policy_from_spec_cached(opponent_spec)
     turns_all: list[int] = []
     turns_wins: list[int] = []
     turns_losses: list[int] = []

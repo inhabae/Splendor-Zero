@@ -145,6 +145,11 @@ class SplendorNativeEnv:
             raise RuntimeError("Game not initialized; call reset() first")
         return self._to_step_state(self._env.step(int(action_idx)))
 
+    def heuristic_action(self) -> int:
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return int(self._env.heuristic_action())
+
     def debug_raw_state(self) -> np.ndarray:
         """Test/debug helper exposing the native pre-normalized state vector."""
         if not self._initialized:

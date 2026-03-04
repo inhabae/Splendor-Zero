@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import cProfile
+import io
 import json
+import multiprocessing as mp
 import os
+import pstats
 import random
 import tempfile
 import time
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 import numpy as np
 import torch
@@ -42,6 +47,18 @@ MASK_FILL_VALUE = -1e9
 SIGN_EPS = 1e-6
 HEURISTIC_EVAL_MCTS_SIMS = 64
 HEURISTIC_EVAL_GAMES = 50
+_CYCLE_TIMING_SECTION_KEYS: tuple[str, ...] = (
+    "selfplay_source_prepare_sec",
+    "collection_total_sec",
+    "train_total_sec",
+    "eval_full_replay_sec",
+    "checkpoint_save_sec",
+    "benchmark_suite_sec",
+    "heuristic_eval_sec",
+    "promotion_eval_sec",
+    "promotion_registry_update_sec",
+    "replay_save_sec",
+)
 
 
 def masked_logits(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -297,6 +314,56 @@ def _sanitize_run_id_for_filename(run_id: str) -> str:
     return safe or "run"
 
 
+def _new_cycle_timing_sections() -> dict[str, float]:
+    sections = {key: 0.0 for key in _CYCLE_TIMING_SECTION_KEYS}
+    sections["cycle_total_wall_sec"] = 0.0
+    sections["other_wall_sec"] = 0.0
+    return sections
+
+
+def _cycle_timing_sections_sum(sections: dict[str, float]) -> float:
+    return float(sum(float(sections.get(key, 0.0)) for key in _CYCLE_TIMING_SECTION_KEYS))
+
+
+def _timing_pct(value: float, total: float) -> float:
+    return 0.0 if float(total) <= 0.0 else float(100.0 * float(value) / float(total))
+
+
+def _resolve_profile_tag(profile_tag: str | None) -> str:
+    raw = "" if profile_tag is None else str(profile_tag).strip()
+    if raw:
+        return _sanitize_run_id_for_filename(raw)
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def _write_deep_profile_artifacts(
+    profile: cProfile.Profile,
+    out_dir: Path,
+    *,
+    global_cycle_idx: int,
+) -> dict[str, str]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = f"deep_cycle_{int(global_cycle_idx):04d}"
+    profile_path = out_dir / f"{base}.prof"
+    profile.dump_stats(str(profile_path))
+
+    text_paths: dict[str, str] = {}
+    for sort_key in ("cumulative", "tottime"):
+        stream = io.StringIO()
+        stats = pstats.Stats(profile, stream=stream)
+        stats.sort_stats(sort_key)
+        stats.print_stats(120)
+        text_path = out_dir / f"{base}_{sort_key}.txt"
+        text_path.write_text(stream.getvalue(), encoding="utf-8")
+        text_paths[sort_key] = str(text_path.resolve())
+
+    return {
+        "profile_path": str(profile_path.resolve()),
+        "cumulative_path": text_paths["cumulative"],
+        "tottime_path": text_paths["tottime"],
+    }
+
+
 def _resolve_champion_lineage_registry_path(
     *,
     run_id: str,
@@ -515,6 +582,20 @@ def _collect_replay(
         "collection_wall_sec": float(elapsed),
         "collection_steps_per_sec": _avg_or_zero(float(total_steps), float(elapsed)),
         "collector_workers_used": 1.0,
+        "parallel_checkpoint_materialize_sec": 0.0,
+        "parallel_worker_session_sec": 0.0,
+        "parallel_unpack_and_replay_add_sec": 0.0,
+        "parallel_episode_aggregate_sec": 0.0,
+        "worker_total_sec_mean": 0.0,
+        "worker_total_sec_min": 0.0,
+        "worker_total_sec_max": 0.0,
+        "worker_selfplay_sec_mean": 0.0,
+        "worker_selfplay_sec_min": 0.0,
+        "worker_selfplay_sec_max": 0.0,
+        "worker_model_load_sec_mean": 0.0,
+        "worker_model_load_sec_max": 0.0,
+        "worker_pack_sec_mean": 0.0,
+        "worker_pack_sec_max": 0.0,
         "next_seed": int(next_seed),
     }
 
@@ -537,6 +618,10 @@ def _collect_replay_parallel_mcts(
         raise ValueError("workers must be positive")
     collect_t0 = time.perf_counter()
     workers_used = min(int(workers), int(episodes))
+    checkpoint_materialize_sec = 0.0
+    worker_session_sec = 0.0
+    unpack_and_replay_add_sec = 0.0
+    episode_aggregate_sec = 0.0
 
     def _run_session(checkpoint_path: str) -> object:
         if worker_pool is not None:
@@ -558,11 +643,16 @@ def _collect_replay_parallel_mcts(
         )
 
     if checkpoint_path_override is not None:
+        checkpoint_t0 = time.perf_counter()
         ckpt_path = Path(checkpoint_path_override)
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+        checkpoint_materialize_sec += time.perf_counter() - checkpoint_t0
+        session_t0 = time.perf_counter()
         session = _run_session(str(ckpt_path))
+        worker_session_sec += time.perf_counter() - session_t0
     else:
+        checkpoint_t0 = time.perf_counter()
         with tempfile.TemporaryDirectory(prefix="splendor_parallel_collect_") as tmp_dir:
             checkpoint = save_checkpoint(
                 model,
@@ -571,9 +661,13 @@ def _collect_replay_parallel_mcts(
                 cycle_idx=0,
                 metadata={"seed": int(seed_start), "mcts_sims": int(mcts_config.num_simulations)},
             )
+            checkpoint_materialize_sec += time.perf_counter() - checkpoint_t0
+            session_t0 = time.perf_counter()
             session = _run_session(str(checkpoint.path))
+            worker_session_sec += time.perf_counter() - session_t0
 
     steps_by_episode: dict[int, dict[str, int | bool]] = {}
+    unpack_t0 = time.perf_counter()
     for step in session.steps:
         replay.add(
             ReplaySample(
@@ -597,7 +691,9 @@ def _collect_replay_parallel_mcts(
         row["max_turn_idx"] = max(int(row["max_turn_idx"]), int(step.turn_idx))
         if bool(step.reached_cutoff):
             row["reached_cutoff"] = True
+    unpack_and_replay_add_sec += time.perf_counter() - unpack_t0
 
+    aggregate_t0 = time.perf_counter()
     cutoff_count = 0
     total_steps = 0
     total_turns = 0
@@ -610,9 +706,11 @@ def _collect_replay_parallel_mcts(
             total_turns += int(row["max_turn_idx"]) + 1
         if bool(row["reached_cutoff"]):
             cutoff_count += 1
+    episode_aggregate_sec += time.perf_counter() - aggregate_t0
 
     terminal_episodes = int(episodes) - int(cutoff_count)
     elapsed = time.perf_counter() - collect_t0
+    session_metadata = dict(getattr(session, "metadata", {}) or {})
     return {
         "episodes": float(episodes),
         "terminal_episodes": float(terminal_episodes),
@@ -632,6 +730,20 @@ def _collect_replay_parallel_mcts(
         "collection_wall_sec": float(elapsed),
         "collection_steps_per_sec": _avg_or_zero(float(total_steps), float(elapsed)),
         "collector_workers_used": float(workers_used),
+        "parallel_checkpoint_materialize_sec": float(checkpoint_materialize_sec),
+        "parallel_worker_session_sec": float(worker_session_sec),
+        "parallel_unpack_and_replay_add_sec": float(unpack_and_replay_add_sec),
+        "parallel_episode_aggregate_sec": float(episode_aggregate_sec),
+        "worker_total_sec_mean": float(session_metadata.get("worker_total_sec_mean", 0.0)),
+        "worker_total_sec_min": float(session_metadata.get("worker_total_sec_min", 0.0)),
+        "worker_total_sec_max": float(session_metadata.get("worker_total_sec_max", 0.0)),
+        "worker_selfplay_sec_mean": float(session_metadata.get("worker_selfplay_sec_mean", 0.0)),
+        "worker_selfplay_sec_min": float(session_metadata.get("worker_selfplay_sec_min", 0.0)),
+        "worker_selfplay_sec_max": float(session_metadata.get("worker_selfplay_sec_max", 0.0)),
+        "worker_model_load_sec_mean": float(session_metadata.get("worker_model_load_sec_mean", 0.0)),
+        "worker_model_load_sec_max": float(session_metadata.get("worker_model_load_sec_max", 0.0)),
+        "worker_pack_sec_mean": float(session_metadata.get("worker_pack_sec_mean", 0.0)),
+        "worker_pack_sec_max": float(session_metadata.get("worker_pack_sec_max", 0.0)),
         "next_seed": int(seed_start + episodes),
     }
 
@@ -1062,6 +1174,11 @@ def run_cycles(
     viz_save_every_cycle: int = 1,
     collector_workers: int | None = None,
     benchmark_workers: int = 1,
+    profile_timing: bool = False,
+    profile_out_dir: str = "nn_artifacts/profiles",
+    profile_tag: str | None = None,
+    deep_profile_cycle: int = 0,
+    deep_profile_sort: str = "cumulative",
 ) -> dict[str, object]:
     random.seed(seed)
     np.random.seed(seed)
@@ -1095,6 +1212,10 @@ def run_cycles(
         raise ValueError("collector_workers must be positive when provided")
     if benchmark_workers <= 0:
         raise ValueError("benchmark_workers must be positive")
+    if deep_profile_cycle < 0:
+        raise ValueError("deep_profile_cycle must be >= 0")
+    if str(deep_profile_sort) not in ("cumulative", "tottime"):
+        raise ValueError("deep_profile_sort must be one of: cumulative, tottime")
     _require_mcts_collector_policy(collector_policy)
 
     resumed_from_metadata: dict[str, object] = {}
@@ -1183,6 +1304,16 @@ def run_cycles(
             run_name=run_name,
             save_every_cycle=viz_save_stride,
         )
+    profile_timing_enabled = bool(profile_timing)
+    deep_profile_cycle_idx = int(deep_profile_cycle)
+    deep_profile_sort_key = str(deep_profile_sort)
+    profile_effective_tag = _resolve_profile_tag(profile_tag)
+    profile_artifact_dir = Path(profile_out_dir) / _sanitize_run_id_for_filename(run_id)
+    cycle_timing_jsonl_path = profile_artifact_dir / f"cycle_timing_{profile_effective_tag}.jsonl"
+    if profile_timing_enabled or deep_profile_cycle_idx > 0:
+        profile_artifact_dir.mkdir(parents=True, exist_ok=True)
+    if profile_timing_enabled:
+        print(f"cycle_timing_profile_path={cycle_timing_jsonl_path.resolve()}")
 
     total_episodes = 0.0
     total_terminal_episodes = 0.0
@@ -1208,12 +1339,25 @@ def run_cycles(
     weighted_sum_eval_value_loss = 0.0
     weighted_sum_eval_total_loss = 0.0
     total_eval_samples = 0.0
+    timing_cycle_total_sec_sum = 0.0
+    timing_collection_sec_sum = 0.0
+    timing_train_sec_sum = 0.0
+    timing_eval_sec_sum = 0.0
+    timing_heuristic_eval_sec_sum = 0.0
+    timing_benchmark_sec_sum = 0.0
+    timing_promotion_eval_sec_sum = 0.0
+    timing_promotion_registry_sec_sum = 0.0
+    timing_checkpoint_save_sec_sum = 0.0
+    timing_replay_save_sec_sum = 0.0
+    timing_other_sec_sum = 0.0
 
     last_train_metrics: dict[str, object] = {}
     last_eval_metrics: dict[str, object] = {}
     last_benchmark_metrics: dict[str, object] = {}
     last_heuristic_eval_metrics: dict[str, object] = {}
     last_promotion_metrics: dict[str, object] = {}
+    last_cycle_timing: dict[str, float] = _new_cycle_timing_sections()
+    deep_profile_saved_paths: dict[str, str] = {}
     last_selfplay_source_mode = "learner_temp"
     last_selfplay_source_checkpoint = ""
     source_model_cache_path: str | None = None
@@ -1254,9 +1398,22 @@ def run_cycles(
         if configured_workers > 1
         else nullcontext(None)
     )
-    with pool_ctx as parallel_worker_pool, SplendorNativeEnv() as env:
+    benchmark_pool_ctx = (
+        ProcessPoolExecutor(max_workers=int(effective_benchmark_workers), mp_context=mp.get_context("spawn"))
+        if int(effective_benchmark_workers) > 1
+        else nullcontext(None)
+    )
+    with pool_ctx as parallel_worker_pool, benchmark_pool_ctx as benchmark_worker_pool, SplendorNativeEnv() as env:
         for cycle_idx in range(1, cycles + 1):
             global_cycle_idx = resume_base_cycle_idx + cycle_idx
+            cycle_timing = _new_cycle_timing_sections()
+            cycle_wall_t0 = time.perf_counter()
+            cycle_deep_profile_paths: dict[str, str] = {}
+            deep_profile_this_cycle = deep_profile_cycle_idx > 0 and int(global_cycle_idx) == int(deep_profile_cycle_idx)
+            cycle_profiler: cProfile.Profile | None = None
+            if deep_profile_this_cycle:
+                cycle_profiler = cProfile.Profile()
+                cycle_profiler.enable()
             checkpoint_cycle = (
                 int(save_checkpoint_every_cycles) > 0
                 and (global_cycle_idx % int(save_checkpoint_every_cycles) == 0)
@@ -1264,6 +1421,7 @@ def run_cycles(
             if not rolling_replay:
                 replay = ReplayBuffer()
 
+            selfplay_prepare_t0 = time.perf_counter()
             selfplay_source_mode = "learner_temp"
             selfplay_source_checkpoint = ""
             selfplay_source_model: MaskedPolicyValueNet = model
@@ -1296,10 +1454,12 @@ def run_cycles(
                 f"mode={selfplay_source_mode} "
                 f"checkpoint={selfplay_source_checkpoint if selfplay_source_checkpoint else 'learner_temp'}"
             )
+            cycle_timing["selfplay_source_prepare_sec"] += time.perf_counter() - selfplay_prepare_t0
             last_selfplay_source_mode = selfplay_source_mode
             last_selfplay_source_checkpoint = selfplay_source_checkpoint
 
             replay_size_before_collect = len(replay)
+            collect_t0 = time.perf_counter()
             if configured_workers > 1:
                 collection_metrics = _collect_replay_parallel_mcts(
                     replay,
@@ -1325,6 +1485,7 @@ def run_cycles(
                     seed_start=next_episode_seed,
                     mcts_config=mcts_config,
                 )
+            cycle_timing["collection_total_sec"] += time.perf_counter() - collect_t0
             next_episode_seed = int(collection_metrics["next_seed"])
             replay_added = len(replay) - replay_size_before_collect
 
@@ -1351,6 +1512,7 @@ def run_cycles(
                         )
                 step_metrics_callback = _cycle_step_callback
 
+            train_t0 = time.perf_counter()
             train_metrics = _train_on_replay(
                 model,
                 optimizer,
@@ -1362,12 +1524,15 @@ def run_cycles(
                 log_prefix=f"cycle={cycle_idx}/{cycles} ",
                 step_metrics_callback=step_metrics_callback,
             )
+            cycle_timing["train_total_sec"] += time.perf_counter() - train_t0
             last_train_metrics = train_metrics
+            eval_t0 = time.perf_counter()
             eval_metrics = _evaluate_on_replay_full(
                 model,
                 replay,
                 device=device,
             )
+            cycle_timing["eval_full_replay_sec"] += time.perf_counter() - eval_t0
             last_eval_metrics = eval_metrics
             if viz_logger is not None:
                 cycle_global_step = global_cycle_idx * int(train_steps_per_cycle)
@@ -1456,6 +1621,7 @@ def run_cycles(
             )
             if should_make_candidate_checkpoint:
                 if save_every_checkpoint:
+                    checkpoint_save_t0 = time.perf_counter()
                     checkpoint_info = save_checkpoint(
                         model,
                         output_dir=checkpoint_dir,
@@ -1463,10 +1629,12 @@ def run_cycles(
                         cycle_idx=global_cycle_idx,
                         metadata=checkpoint_metadata,
                     )
+                    cycle_timing["checkpoint_save_sec"] += time.perf_counter() - checkpoint_save_t0
                     candidate_checkpoint_path = str(checkpoint_info.path)
                     print(f"cycle_checkpoint={cycle_idx}/{cycles} path={checkpoint_info.path}")
                 else:
                     candidate_checkpoint_tmpdir = tempfile.TemporaryDirectory(prefix="splendor_cycle_candidate_")
+                    checkpoint_save_t0 = time.perf_counter()
                     checkpoint_info = save_checkpoint(
                         model,
                         output_dir=candidate_checkpoint_tmpdir.name,
@@ -1474,10 +1642,12 @@ def run_cycles(
                         cycle_idx=global_cycle_idx,
                         metadata=checkpoint_metadata,
                     )
+                    cycle_timing["checkpoint_save_sec"] += time.perf_counter() - checkpoint_save_t0
                     candidate_checkpoint_path = str(checkpoint_info.path)
                     print(f"cycle_checkpoint_temp={cycle_idx}/{cycles} path={checkpoint_info.path}")
 
             if benchmark_suite and checkpoint_cycle:
+                benchmark_t0 = time.perf_counter()
                 suite_opponents = [GreedyHeuristicOpponent(name="heuristic")]
                 if not candidate_checkpoint_path:
                     raise RuntimeError("Benchmark suite requires candidate checkpoint")
@@ -1496,6 +1666,8 @@ def run_cycles(
                     seed_base=effective_benchmark_seed,
                     cycle_idx=cycle_idx,
                     parallel_workers=min(int(effective_benchmark_workers), int(benchmark_games_per_opponent)),
+                    executor=benchmark_worker_pool,
+                    max_workers=effective_benchmark_workers,
                 )
                 _print_benchmark_suite(cycle_idx, cycles, suite_result)
                 last_benchmark_metrics = {
@@ -1506,6 +1678,7 @@ def run_cycles(
                     "benchmark_suite_avg_turns_per_game": float(suite_result.suite_avg_turns_per_game),
                     "benchmark_candidate_checkpoint": str(candidate_checkpoint_path),
                 }
+                cycle_timing["benchmark_suite_sec"] += time.perf_counter() - benchmark_t0
             elif benchmark_suite:
                 print(
                     f"cycle_benchmark_skip={cycle_idx}/{cycles} "
@@ -1514,76 +1687,99 @@ def run_cycles(
                     f"global_cycle={global_cycle_idx}"
                 )
 
-            try:
-                heuristic_candidate = ModelMCTSOpponent(
-                    model=model,
-                    mcts_config=heuristic_eval_mcts_config,
-                    device=device,
-                    name="candidate",
-                )
-                heuristic_opponent = GreedyHeuristicOpponent(name="heuristic")
-                heuristic_matchup = run_matchup(
-                    env,
-                    heuristic_candidate,
-                    heuristic_opponent,
-                    games=int(HEURISTIC_EVAL_GAMES),
-                    max_turns=int(max_turns),
-                    seed_base=int(effective_benchmark_seed + 2_000_000),
-                    cycle_idx=int(cycle_idx),
-                    parallel_workers=min(int(effective_benchmark_workers), int(HEURISTIC_EVAL_GAMES)),
-                )
-                print(
-                    f"cycle_heuristic_eval={cycle_idx}/{cycles} "
-                    f"games={heuristic_matchup.games} "
-                    f"wins={heuristic_matchup.candidate_wins} "
-                    f"losses={heuristic_matchup.candidate_losses} "
-                    f"draws={heuristic_matchup.draws} "
-                    f"win_rate={heuristic_matchup.candidate_win_rate:.3f} "
-                    f"nonloss_rate={heuristic_matchup.candidate_nonloss_rate:.3f} "
-                    f"avg_turns={heuristic_matchup.avg_turns_per_game:.2f}"
-                )
-                row = {
-                    "run_id": run_id,
-                    "lineage_run_id": champion_lineage_run_id,
-                    "cycle_idx": int(cycle_idx),
-                    "global_cycle_idx": int(global_cycle_idx),
-                    "games": int(heuristic_matchup.games),
-                    "mcts_sims": int(HEURISTIC_EVAL_MCTS_SIMS),
-                    "max_turns": int(max_turns),
-                    "wins": int(heuristic_matchup.candidate_wins),
-                    "losses": int(heuristic_matchup.candidate_losses),
-                    "draws": int(heuristic_matchup.draws),
-                    "win_rate": float(heuristic_matchup.candidate_win_rate),
-                    "nonloss_rate": float(heuristic_matchup.candidate_nonloss_rate),
-                    "avg_turns_per_game": float(heuristic_matchup.avg_turns_per_game),
-                    "cutoff_rate": float(heuristic_matchup.cutoff_rate),
-                }
-                _append_jsonl_row(heuristic_eval_path, row)
-                last_heuristic_eval_metrics = {
-                    "heuristic_eval_games": float(heuristic_matchup.games),
-                    "heuristic_eval_mcts_sims": float(HEURISTIC_EVAL_MCTS_SIMS),
-                    "heuristic_eval_win_rate": float(heuristic_matchup.candidate_win_rate),
-                    "heuristic_eval_nonloss_rate": float(heuristic_matchup.candidate_nonloss_rate),
-                    "heuristic_eval_avg_turns_per_game": float(heuristic_matchup.avg_turns_per_game),
-                    "heuristic_eval_cutoff_rate": float(heuristic_matchup.cutoff_rate),
-                }
-            except Exception as exc:
-                print(f"cycle_heuristic_eval_warning={cycle_idx}/{cycles} {exc}")
-                _append_jsonl_row(
-                    heuristic_eval_path,
-                    {
+            should_run_heuristic_eval = int(save_checkpoint_every_cycles) <= 0 or checkpoint_cycle
+            if should_run_heuristic_eval:
+                heuristic_eval_t0 = time.perf_counter()
+                try:
+                    if candidate_checkpoint_path:
+                        heuristic_candidate = CheckpointMCTSOpponent(
+                            checkpoint_path=str(candidate_checkpoint_path),
+                            mcts_config=heuristic_eval_mcts_config,
+                            device=device,
+                            name="candidate",
+                        )
+                    else:
+                        heuristic_candidate = ModelMCTSOpponent(
+                            model=model,
+                            mcts_config=heuristic_eval_mcts_config,
+                            device=device,
+                            name="candidate",
+                        )
+                    heuristic_opponent = GreedyHeuristicOpponent(name="heuristic")
+                    heuristic_matchup = run_matchup(
+                        env,
+                        heuristic_candidate,
+                        heuristic_opponent,
+                        games=int(HEURISTIC_EVAL_GAMES),
+                        max_turns=int(max_turns),
+                        seed_base=int(effective_benchmark_seed + 2_000_000),
+                        cycle_idx=int(cycle_idx),
+                        parallel_workers=min(int(effective_benchmark_workers), int(HEURISTIC_EVAL_GAMES)),
+                        executor=benchmark_worker_pool,
+                        max_workers=effective_benchmark_workers,
+                    )
+                    print(
+                        f"cycle_heuristic_eval={cycle_idx}/{cycles} "
+                        f"games={heuristic_matchup.games} "
+                        f"wins={heuristic_matchup.candidate_wins} "
+                        f"losses={heuristic_matchup.candidate_losses} "
+                        f"draws={heuristic_matchup.draws} "
+                        f"win_rate={heuristic_matchup.candidate_win_rate:.3f} "
+                        f"nonloss_rate={heuristic_matchup.candidate_nonloss_rate:.3f} "
+                        f"avg_turns={heuristic_matchup.avg_turns_per_game:.2f}"
+                    )
+                    row = {
                         "run_id": run_id,
                         "lineage_run_id": champion_lineage_run_id,
                         "cycle_idx": int(cycle_idx),
                         "global_cycle_idx": int(global_cycle_idx),
-                        "games": int(HEURISTIC_EVAL_GAMES),
+                        "games": int(heuristic_matchup.games),
                         "mcts_sims": int(HEURISTIC_EVAL_MCTS_SIMS),
                         "max_turns": int(max_turns),
-                        "error": str(exc),
-                    },
+                        "wins": int(heuristic_matchup.candidate_wins),
+                        "losses": int(heuristic_matchup.candidate_losses),
+                        "draws": int(heuristic_matchup.draws),
+                        "win_rate": float(heuristic_matchup.candidate_win_rate),
+                        "nonloss_rate": float(heuristic_matchup.candidate_nonloss_rate),
+                        "avg_turns_per_game": float(heuristic_matchup.avg_turns_per_game),
+                        "cutoff_rate": float(heuristic_matchup.cutoff_rate),
+                    }
+                    _append_jsonl_row(heuristic_eval_path, row)
+                    last_heuristic_eval_metrics = {
+                        "heuristic_eval_games": float(heuristic_matchup.games),
+                        "heuristic_eval_mcts_sims": float(HEURISTIC_EVAL_MCTS_SIMS),
+                        "heuristic_eval_win_rate": float(heuristic_matchup.candidate_win_rate),
+                        "heuristic_eval_nonloss_rate": float(heuristic_matchup.candidate_nonloss_rate),
+                        "heuristic_eval_avg_turns_per_game": float(heuristic_matchup.avg_turns_per_game),
+                        "heuristic_eval_cutoff_rate": float(heuristic_matchup.cutoff_rate),
+                    }
+                    cycle_timing["heuristic_eval_sec"] += time.perf_counter() - heuristic_eval_t0
+                except Exception as exc:
+                    print(f"cycle_heuristic_eval_warning={cycle_idx}/{cycles} {exc}")
+                    _append_jsonl_row(
+                        heuristic_eval_path,
+                        {
+                            "run_id": run_id,
+                            "lineage_run_id": champion_lineage_run_id,
+                            "cycle_idx": int(cycle_idx),
+                            "global_cycle_idx": int(global_cycle_idx),
+                            "games": int(HEURISTIC_EVAL_GAMES),
+                            "mcts_sims": int(HEURISTIC_EVAL_MCTS_SIMS),
+                            "max_turns": int(max_turns),
+                            "error": str(exc),
+                        },
+                    )
+                    cycle_timing["heuristic_eval_sec"] += time.perf_counter() - heuristic_eval_t0
+            else:
+                print(
+                    f"cycle_heuristic_eval_skip={cycle_idx}/{cycles} "
+                    f"reason=interval "
+                    f"every={int(save_checkpoint_every_cycles)} "
+                    f"global_cycle={global_cycle_idx}"
                 )
 
             if auto_promote and checkpoint_cycle:
+                promotion_eval_t0 = time.perf_counter()
                 if not candidate_checkpoint_path:
                     raise RuntimeError("Auto-promotion requires candidate checkpoint")
                 promo_suite_opponents, has_current_champion = _build_suite_opponents_from_registry(
@@ -1608,6 +1804,8 @@ def run_cycles(
                     seed_base=effective_benchmark_seed + 10_000_000,
                     cycle_idx=cycle_idx,
                     parallel_workers=min(int(effective_benchmark_workers), int(promotion_games)),
+                    executor=benchmark_worker_pool,
+                    max_workers=effective_benchmark_workers,
                 )
                 should_promote, promote_reason, promote_details = _promotion_decision_from_suite(
                     promo_suite,
@@ -1632,6 +1830,7 @@ def run_cycles(
                 if should_promote:
                     try:
                         if not save_every_checkpoint:
+                            checkpoint_save_t0 = time.perf_counter()
                             checkpoint_info = save_checkpoint(
                                 model,
                                 output_dir=checkpoint_dir,
@@ -1639,10 +1838,12 @@ def run_cycles(
                                 cycle_idx=global_cycle_idx,
                                 metadata=checkpoint_metadata,
                             )
+                            cycle_timing["checkpoint_save_sec"] += time.perf_counter() - checkpoint_save_t0
                             candidate_checkpoint_path = str(checkpoint_info.path)
                             print(f"cycle_checkpoint_champion={cycle_idx}/{cycles} path={checkpoint_info.path}")
                         if checkpoint_info is None:
                             raise RuntimeError("Promoted champion checkpoint missing")
+                        promotion_registry_t0 = time.perf_counter()
                         registry = load_champion_registry(champion_registry_effective_path)
                         promo_metrics = {
                             "promotion_games": int(promotion_games),
@@ -1669,6 +1870,7 @@ def run_cycles(
                             ),
                         )
                         save_champion_registry(champion_registry_effective_path, registry)
+                        cycle_timing["promotion_registry_update_sec"] += time.perf_counter() - promotion_registry_t0
                         print(
                             f"cycle_promotion_registry_update={cycle_idx}/{cycles} "
                             f"registry={champion_registry_effective_path} "
@@ -1691,6 +1893,7 @@ def run_cycles(
                 for k, v in promote_details.items():
                     if v is not None:
                         last_promotion_metrics[k] = v
+                cycle_timing["promotion_eval_sec"] += time.perf_counter() - promotion_eval_t0
             elif auto_promote:
                 print(
                     f"cycle_promotion_skip={cycle_idx}/{cycles} "
@@ -1737,15 +1940,110 @@ def run_cycles(
             ):
                 should_save_replay = True
             if should_save_replay:
+                replay_save_t0 = time.perf_counter()
                 replay_out_dir.mkdir(parents=True, exist_ok=True)
                 if rolling_replay_state_path.exists():
                     rolling_replay_state_path.unlink()
                 last_saved_replay_path = replay.save_npz(rolling_replay_state_path)
+                cycle_timing["replay_save_sec"] += time.perf_counter() - replay_save_t0
                 print(
                     f"replay_state_saved_cycle={cycle_idx}/{cycles} "
                     f"path={last_saved_replay_path.resolve()} "
                     f"samples={len(replay)}"
                 )
+
+            cycle_timing["cycle_total_wall_sec"] = time.perf_counter() - cycle_wall_t0
+            section_sum_sec = _cycle_timing_sections_sum(cycle_timing)
+            cycle_timing["other_wall_sec"] = max(0.0, float(cycle_timing["cycle_total_wall_sec"]) - section_sum_sec)
+            cycle_timing_warnings: list[str] = []
+            if section_sum_sec > float(cycle_timing["cycle_total_wall_sec"]) + 1e-6:
+                cycle_timing_warnings.append("section_sum_exceeds_total")
+
+            if cycle_profiler is not None:
+                cycle_profiler.disable()
+                cycle_deep_profile_paths = _write_deep_profile_artifacts(
+                    cycle_profiler,
+                    profile_artifact_dir,
+                    global_cycle_idx=int(global_cycle_idx),
+                )
+                deep_profile_saved_paths = dict(cycle_deep_profile_paths)
+                preferred_summary_key = f"{deep_profile_sort_key}_path"
+                preferred_summary = cycle_deep_profile_paths.get(
+                    preferred_summary_key,
+                    cycle_deep_profile_paths.get("cumulative_path", ""),
+                )
+                print(
+                    f"cycle_deep_profile={cycle_idx}/{cycles} "
+                    f"profile={cycle_deep_profile_paths.get('profile_path', '')} "
+                    f"summary={preferred_summary}"
+                )
+                print(
+                    f"cycle_deep_profile_note={cycle_idx}/{cycles} "
+                    "scope=main_process_only worker_breakdown=timing_metrics"
+                )
+
+            timing_cycle_total_sec_sum += float(cycle_timing["cycle_total_wall_sec"])
+            timing_collection_sec_sum += float(cycle_timing["collection_total_sec"])
+            timing_train_sec_sum += float(cycle_timing["train_total_sec"])
+            timing_eval_sec_sum += float(cycle_timing["eval_full_replay_sec"])
+            timing_heuristic_eval_sec_sum += float(cycle_timing["heuristic_eval_sec"])
+            timing_benchmark_sec_sum += float(cycle_timing["benchmark_suite_sec"])
+            timing_promotion_eval_sec_sum += float(cycle_timing["promotion_eval_sec"])
+            timing_promotion_registry_sec_sum += float(cycle_timing["promotion_registry_update_sec"])
+            timing_checkpoint_save_sec_sum += float(cycle_timing["checkpoint_save_sec"])
+            timing_replay_save_sec_sum += float(cycle_timing["replay_save_sec"])
+            timing_other_sec_sum += float(cycle_timing["other_wall_sec"])
+            last_cycle_timing = {k: float(v) for k, v in cycle_timing.items()}
+
+            print(
+                f"cycle_timing={cycle_idx}/{cycles} "
+                f"total_sec={float(cycle_timing['cycle_total_wall_sec']):.3f} "
+                f"collection_sec={float(cycle_timing['collection_total_sec']):.3f} "
+                f"train_sec={float(cycle_timing['train_total_sec']):.3f} "
+                f"eval_sec={float(cycle_timing['eval_full_replay_sec']):.3f} "
+                f"heuristic_eval_sec={float(cycle_timing['heuristic_eval_sec']):.3f} "
+                f"benchmark_sec={float(cycle_timing['benchmark_suite_sec']):.3f} "
+                f"promotion_sec={float(cycle_timing['promotion_eval_sec'] + cycle_timing['promotion_registry_update_sec']):.3f} "
+                f"other_sec={float(cycle_timing['other_wall_sec']):.3f}"
+            )
+            if profile_timing_enabled:
+                cycle_row: dict[str, Any] = {
+                    "run_id": str(run_id),
+                    "cycle_idx": int(cycle_idx),
+                    "global_cycle_idx": int(global_cycle_idx),
+                    "collector_workers_configured": int(configured_workers),
+                    "collector_workers_used": int(collection_metrics.get("collector_workers_used", 1.0)),
+                    "seed_start": int(next_episode_seed - int(episodes_per_cycle)),
+                    "seed_next": int(next_episode_seed),
+                    "sections_sum_sec": float(section_sum_sec),
+                    "warnings": list(cycle_timing_warnings),
+                }
+                for key, value in cycle_timing.items():
+                    cycle_row[key] = float(value)
+                pct_denom = float(cycle_timing["cycle_total_wall_sec"])
+                for key in _CYCLE_TIMING_SECTION_KEYS:
+                    cycle_row[f"pct_{key}"] = _timing_pct(float(cycle_timing[key]), pct_denom)
+                cycle_row["pct_other_wall_sec"] = _timing_pct(float(cycle_timing["other_wall_sec"]), pct_denom)
+                for key in (
+                    "parallel_checkpoint_materialize_sec",
+                    "parallel_worker_session_sec",
+                    "parallel_unpack_and_replay_add_sec",
+                    "parallel_episode_aggregate_sec",
+                    "worker_total_sec_mean",
+                    "worker_total_sec_min",
+                    "worker_total_sec_max",
+                    "worker_selfplay_sec_mean",
+                    "worker_selfplay_sec_min",
+                    "worker_selfplay_sec_max",
+                    "worker_model_load_sec_mean",
+                    "worker_model_load_sec_max",
+                    "worker_pack_sec_mean",
+                    "worker_pack_sec_max",
+                ):
+                    cycle_row[key] = float(collection_metrics.get(key, 0.0))
+                if cycle_deep_profile_paths:
+                    cycle_row["deep_profile_path"] = str(cycle_deep_profile_paths.get("profile_path", ""))
+                _append_jsonl_row(cycle_timing_jsonl_path, cycle_row)
 
     if viz_logger is not None:
         viz_logger.finalize()
@@ -1771,6 +2069,7 @@ def run_cycles(
     else:
         print("replay_state_saved=disabled")
 
+    timing_promotion_sec_sum = float(timing_promotion_eval_sec_sum + timing_promotion_registry_sec_sum)
     result: dict[str, object] = {
         "mode": "cycles",
         "collector_policy": "mcts",
@@ -1819,6 +2118,42 @@ def run_cycles(
         "replay_state_path": str(replay_state_path.resolve()) if replay_state_path is not None else "",
         "replay_state_samples": float(len(replay)),
         "replay_save_every_cycles": float(replay_save_every_cycles),
+        "timing_profile_enabled": float(1 if profile_timing_enabled else 0),
+        "timing_profile_path": str(cycle_timing_jsonl_path.resolve()) if profile_timing_enabled else "",
+        "deep_profile_cycle": float(deep_profile_cycle_idx),
+        "deep_profile_sort": deep_profile_sort_key,
+        "deep_profile_last_profile_path": str(deep_profile_saved_paths.get("profile_path", "")),
+        "deep_profile_last_cumulative_path": str(deep_profile_saved_paths.get("cumulative_path", "")),
+        "deep_profile_last_tottime_path": str(deep_profile_saved_paths.get("tottime_path", "")),
+        "timing_cycle_total_sec_sum": float(timing_cycle_total_sec_sum),
+        "timing_collection_sec_sum": float(timing_collection_sec_sum),
+        "timing_train_sec_sum": float(timing_train_sec_sum),
+        "timing_eval_sec_sum": float(timing_eval_sec_sum),
+        "timing_heuristic_eval_sec_sum": float(timing_heuristic_eval_sec_sum),
+        "timing_benchmark_sec_sum": float(timing_benchmark_sec_sum),
+        "timing_promotion_sec_sum": float(timing_promotion_sec_sum),
+        "timing_checkpoint_save_sec_sum": float(timing_checkpoint_save_sec_sum),
+        "timing_replay_save_sec_sum": float(timing_replay_save_sec_sum),
+        "timing_other_sec_sum": float(timing_other_sec_sum),
+        "timing_avg_cycle_total_sec": _avg_or_zero(float(timing_cycle_total_sec_sum), float(cycles)),
+        "timing_pct_collection": _timing_pct(float(timing_collection_sec_sum), float(timing_cycle_total_sec_sum)),
+        "timing_pct_train": _timing_pct(float(timing_train_sec_sum), float(timing_cycle_total_sec_sum)),
+        "timing_pct_eval": _timing_pct(float(timing_eval_sec_sum), float(timing_cycle_total_sec_sum)),
+        "timing_pct_heuristic_eval": _timing_pct(float(timing_heuristic_eval_sec_sum), float(timing_cycle_total_sec_sum)),
+        "timing_pct_benchmark": _timing_pct(float(timing_benchmark_sec_sum), float(timing_cycle_total_sec_sum)),
+        "timing_pct_promotion": _timing_pct(float(timing_promotion_sec_sum), float(timing_cycle_total_sec_sum)),
+        "timing_pct_other": _timing_pct(float(timing_other_sec_sum), float(timing_cycle_total_sec_sum)),
+        "timing_last_cycle_total_wall_sec": float(last_cycle_timing.get("cycle_total_wall_sec", 0.0)),
+        "timing_last_collection_total_sec": float(last_cycle_timing.get("collection_total_sec", 0.0)),
+        "timing_last_train_total_sec": float(last_cycle_timing.get("train_total_sec", 0.0)),
+        "timing_last_eval_full_replay_sec": float(last_cycle_timing.get("eval_full_replay_sec", 0.0)),
+        "timing_last_heuristic_eval_sec": float(last_cycle_timing.get("heuristic_eval_sec", 0.0)),
+        "timing_last_benchmark_suite_sec": float(last_cycle_timing.get("benchmark_suite_sec", 0.0)),
+        "timing_last_promotion_eval_sec": float(last_cycle_timing.get("promotion_eval_sec", 0.0)),
+        "timing_last_promotion_registry_update_sec": float(last_cycle_timing.get("promotion_registry_update_sec", 0.0)),
+        "timing_last_checkpoint_save_sec": float(last_cycle_timing.get("checkpoint_save_sec", 0.0)),
+        "timing_last_replay_save_sec": float(last_cycle_timing.get("replay_save_sec", 0.0)),
+        "timing_last_other_wall_sec": float(last_cycle_timing.get("other_wall_sec", 0.0)),
     }
     result.update(
         {
@@ -1978,6 +2313,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--viz-save-every-cycle", type=int, default=1)
     p.add_argument("--collector-workers", type=int, default=None)
     p.add_argument("--benchmark-workers", type=int, default=1)
+    p.add_argument("--profile-timing", action="store_true")
+    p.add_argument("--profile-out-dir", type=str, default="nn_artifacts/profiles")
+    p.add_argument("--profile-tag", type=str, default=None)
+    p.add_argument("--deep-profile-cycle", type=int, default=0)
+    p.add_argument("--deep-profile-sort", type=str, choices=["cumulative", "tottime"], default="cumulative")
     return p
 
 
@@ -2052,6 +2392,11 @@ def main() -> None:
             viz_save_every_cycle=args.viz_save_every_cycle,
             collector_workers=args.collector_workers,
             benchmark_workers=args.benchmark_workers,
+            profile_timing=args.profile_timing,
+            profile_out_dir=args.profile_out_dir,
+            profile_tag=args.profile_tag,
+            deep_profile_cycle=args.deep_profile_cycle,
+            deep_profile_sort=args.deep_profile_sort,
         )
     else:
         if not args.candidate_checkpoint:
