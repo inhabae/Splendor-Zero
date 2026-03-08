@@ -17,7 +17,7 @@ class ReplaySample:
     state: np.ndarray  # (246,) float32
     mask: np.ndarray  # (69,) bool
     action_target: int  # int64-compatible
-    value_target: float  # -1,0,+1
+    value_target: float  # blended value target, typically in [-1, +1]
     policy_target: np.ndarray | None = None  # (69,) float32, sums to 1 over legal actions
 
 

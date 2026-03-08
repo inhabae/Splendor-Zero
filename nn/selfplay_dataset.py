@@ -29,6 +29,7 @@ class SelfPlayStep:
     policy: np.ndarray
     value_target: float
     value_root: float
+    value_root_best: float
     action_selected: int
     episode_idx: int
     step_idx: int
@@ -56,6 +57,10 @@ def _winner_to_value_for_player(winner: int, player_id: int) -> float:
     if winner == -1:
         return 0.0
     return 1.0 if int(winner) == int(player_id) else -1.0
+
+
+def _blend_root_and_outcome(value_root: float, value_outcome: float) -> float:
+    return 0.5 * (float(value_root) + float(value_outcome))
 
 
 def run_selfplay_session(
@@ -130,8 +135,9 @@ def run_selfplay_session(
                     state=state.state.copy(),
                     mask=state.mask.copy(),
                     policy=policy,
-                    value_target=0.0,  # Filled after episode outcome is known.
+                    value_target=0.0,  # Filled after episode outcome/root-value blend is known.
                     value_root=float(mcts_result.root_value),
+                    value_root_best=float(mcts_result.root_best_value),
                     action_selected=action,
                     episode_idx=int(episode_idx),
                     step_idx=len(episode_steps),
@@ -159,7 +165,8 @@ def run_selfplay_session(
             winner = -1
 
         for step in episode_steps:
-            step.value_target = _winner_to_value_for_player(winner, step.player_id)
+            value_outcome = _winner_to_value_for_player(winner, step.player_id)
+            step.value_target = _blend_root_and_outcome(step.value_root_best, value_outcome)
             step.winner = int(winner)
             step.reached_cutoff = bool(reached_cutoff)
             all_steps.append(step)
@@ -187,6 +194,7 @@ def _pack_steps(steps: list[SelfPlayStep], *, episode_offset: int = 0) -> dict[s
     policies = np.zeros((n, ACTION_DIM), dtype=np.float32)
     value_target = np.zeros((n,), dtype=np.float32)
     value_root = np.zeros((n,), dtype=np.float32)
+    value_root_best = np.zeros((n,), dtype=np.float32)
     action_selected = np.zeros((n,), dtype=np.int32)
     episode_idx = np.zeros((n,), dtype=np.int32)
     step_idx = np.zeros((n,), dtype=np.int32)
@@ -203,6 +211,7 @@ def _pack_steps(steps: list[SelfPlayStep], *, episode_offset: int = 0) -> dict[s
         policies[i] = step.policy
         value_target[i] = float(step.value_target)
         value_root[i] = float(step.value_root)
+        value_root_best[i] = float(step.value_root_best)
         action_selected[i] = int(step.action_selected)
         episode_idx[i] = int(step.episode_idx) + ep_offset
         step_idx[i] = int(step.step_idx)
@@ -218,6 +227,7 @@ def _pack_steps(steps: list[SelfPlayStep], *, episode_offset: int = 0) -> dict[s
         "policy": policies,
         "value_target": value_target,
         "value_root": value_root,
+        "value_root_best": value_root_best,
         "action_selected": action_selected,
         "episode_idx": episode_idx,
         "step_idx": step_idx,
@@ -235,6 +245,7 @@ def _unpack_steps(payload: dict[str, Any]) -> list[SelfPlayStep]:
     policies = np.asarray(payload["policy"], dtype=np.float32)
     value_target = np.asarray(payload["value_target"], dtype=np.float32)
     value_root = np.asarray(payload["value_root"], dtype=np.float32)
+    value_root_best = np.asarray(payload.get("value_root_best", value_root), dtype=np.float32)
     action_selected = np.asarray(payload["action_selected"], dtype=np.int32)
     episode_idx = np.asarray(payload["episode_idx"], dtype=np.int32)
     step_idx = np.asarray(payload["step_idx"], dtype=np.int32)
@@ -254,6 +265,7 @@ def _unpack_steps(payload: dict[str, Any]) -> list[SelfPlayStep]:
     for arr_name, arr in (
         ("value_target", value_target),
         ("value_root", value_root),
+        ("value_root_best", value_root_best),
         ("action_selected", action_selected),
         ("episode_idx", episode_idx),
         ("step_idx", step_idx),
@@ -275,6 +287,7 @@ def _unpack_steps(payload: dict[str, Any]) -> list[SelfPlayStep]:
                 policy=policies[i],
                 value_target=float(value_target[i]),
                 value_root=float(value_root[i]),
+                value_root_best=float(value_root_best[i]),
                 action_selected=int(action_selected[i]),
                 episode_idx=int(episode_idx[i]),
                 step_idx=int(step_idx[i]),
@@ -621,6 +634,7 @@ def save_session_npz(session: SelfPlaySession, out_dir: str | Path) -> Path:
     policies = np.zeros((n, ACTION_DIM), dtype=np.float32)
     value_target = np.zeros((n,), dtype=np.float32)
     value_root = np.zeros((n,), dtype=np.float32)
+    value_root_best = np.zeros((n,), dtype=np.float32)
     action_selected = np.zeros((n,), dtype=np.int32)
     episode_idx = np.zeros((n,), dtype=np.int32)
     step_idx = np.zeros((n,), dtype=np.int32)
@@ -636,6 +650,7 @@ def save_session_npz(session: SelfPlaySession, out_dir: str | Path) -> Path:
         policies[i] = step.policy
         value_target[i] = float(step.value_target)
         value_root[i] = float(step.value_root)
+        value_root_best[i] = float(step.value_root_best)
         action_selected[i] = int(step.action_selected)
         episode_idx[i] = int(step.episode_idx)
         step_idx[i] = int(step.step_idx)
@@ -657,6 +672,7 @@ def save_session_npz(session: SelfPlaySession, out_dir: str | Path) -> Path:
         policy=policies,
         value_target=value_target,
         value_root=value_root,
+        value_root_best=value_root_best,
         action_selected=action_selected,
         episode_idx=episode_idx,
         step_idx=step_idx,
@@ -686,6 +702,7 @@ def load_session_npz(path: str | Path) -> SelfPlaySession:
         policies = np.asarray(npz["policy"], dtype=np.float32)
         value_target = np.asarray(npz["value_target"], dtype=np.float32)
         value_root = np.asarray(npz["value_root"], dtype=np.float32)
+        value_root_best = np.asarray(npz["value_root_best"], dtype=np.float32) if "value_root_best" in npz else value_root
         action_selected = np.asarray(npz["action_selected"], dtype=np.int32)
         episode_idx = np.asarray(npz["episode_idx"], dtype=np.int32)
         step_idx = np.asarray(npz["step_idx"], dtype=np.int32)
@@ -705,6 +722,7 @@ def load_session_npz(path: str | Path) -> SelfPlaySession:
                 policy=policies[i].copy(),
                 value_target=float(value_target[i]),
                 value_root=float(value_root[i]),
+                value_root_best=float(value_root_best[i]),
                 action_selected=int(action_selected[i]),
                 episode_idx=int(episode_idx[i]),
                 step_idx=int(step_idx[i]),

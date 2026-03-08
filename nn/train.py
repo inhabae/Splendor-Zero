@@ -61,6 +61,14 @@ _CYCLE_TIMING_SECTION_KEYS: tuple[str, ...] = (
 )
 
 
+def _configure_mcts_tree_workers(mcts_tree_workers: int | None) -> None:
+    if mcts_tree_workers is None:
+        return
+    if int(mcts_tree_workers) <= 0:
+        raise ValueError("mcts_tree_workers must be positive when provided")
+    os.environ["SPLENDOR_MCTS_TREE_WORKERS"] = str(int(mcts_tree_workers))
+
+
 def masked_logits(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     if logits.shape != mask.shape:
         raise ValueError(f"logits shape {logits.shape} must match mask shape {mask.shape}")
@@ -114,6 +122,7 @@ class _EpisodeStep:
     action_target: int
     policy_target: np.ndarray
     player_id: int
+    value_root: float
 
 
 @dataclass
@@ -130,6 +139,10 @@ def _winner_to_value_for_player(winner: int, player_id: int) -> float:
     if winner not in (0, 1):
         raise ValueError(f"Unexpected winner value {winner}")
     return 1.0 if winner == player_id else -1.0
+
+
+def _blend_root_and_outcome(value_root: float, value_outcome: float) -> float:
+    return 0.5 * (float(value_root) + float(value_outcome))
 
 
 @dataclass
@@ -479,6 +492,7 @@ def collect_episode(
                 action_target=action,
                 policy_target=policy_target,
                 player_id=player_id,
+                value_root=float(mcts_result.root_best_value),
             )
         )
         state = env.step(action)
@@ -497,12 +511,13 @@ def collect_episode(
         reached_cutoff = True
 
     for step in episode_steps:
+        value_outcome = _winner_to_value_for_player(winner, step.player_id)
         replay.add(
             ReplaySample(
                 state=step.state,
                 mask=step.mask,
                 action_target=step.action_target,
-                value_target=_winner_to_value_for_player(winner, step.player_id),
+                value_target=_blend_root_and_outcome(step.value_root, value_outcome),
                 policy_target=step.policy_target,
             )
         )
@@ -617,7 +632,7 @@ def _collect_replay_parallel_mcts(
     if workers <= 0:
         raise ValueError("workers must be positive")
     collect_t0 = time.perf_counter()
-    workers_used = min(int(workers), int(episodes))
+    workers_used = int(workers)
     checkpoint_materialize_sec = 0.0
     worker_session_sec = 0.0
     unpack_and_replay_add_sec = 0.0
@@ -927,6 +942,7 @@ def run_smoke(
     mcts_root_dirichlet_noise: bool = True,
     mcts_root_dirichlet_epsilon: float = 0.25,
     mcts_root_dirichlet_alpha_total: float = 10.0,
+    mcts_tree_workers: int | None = None,
     visualize: bool = False,
     viz_dir: str = "nn_artifacts/viz",
     viz_run_name: str | None = None,
@@ -943,6 +959,7 @@ def run_smoke(
     if model_res_blocks < 0:
         raise ValueError("model_res_blocks must be >= 0")
     _require_mcts_collector_policy(collector_policy)
+    _configure_mcts_tree_workers(mcts_tree_workers)
 
     replay = ReplayBuffer()
     rng = random.Random(seed)
@@ -1157,6 +1174,7 @@ def run_cycles(
     mcts_root_dirichlet_noise: bool = True,
     mcts_root_dirichlet_epsilon: float = 0.25,
     mcts_root_dirichlet_alpha_total: float = 10.0,
+    mcts_tree_workers: int | None = None,
     save_checkpoint_every_cycles: int = 0,
     save_every_checkpoint: bool = False,
     checkpoint_dir: str = "nn_artifacts/checkpoints",
@@ -1232,6 +1250,7 @@ def run_cycles(
     if str(deep_profile_sort) not in ("cumulative", "tottime"):
         raise ValueError("deep_profile_sort must be one of: cumulative, tottime")
     _require_mcts_collector_policy(collector_policy)
+    _configure_mcts_tree_workers(mcts_tree_workers)
 
     resumed_from_metadata: dict[str, object] = {}
     resume_base_cycle_idx = 0
@@ -1381,13 +1400,17 @@ def run_cycles(
     source_model_cache: MaskedPolicyValueNet | None = None
     replay = ReplayBuffer(max_size=(replay_capacity if rolling_replay else None))
     auto_workers = int(os.cpu_count() or 1)
-    requested_workers = int(collector_workers) if collector_workers is not None else auto_workers
-    configured_workers = _recommend_mcts_collector_workers(
-        requested_workers=int(requested_workers),
-        episodes_per_cycle=int(episodes_per_cycle),
-        max_turns=int(max_turns),
-        mcts_sims=int(mcts_sims),
-    )
+    if collector_workers is not None:
+        requested_workers = int(collector_workers)
+        configured_workers = max(1, int(requested_workers))
+    else:
+        requested_workers = int(auto_workers)
+        configured_workers = _recommend_mcts_collector_workers(
+            requested_workers=int(requested_workers),
+            episodes_per_cycle=int(episodes_per_cycle),
+            max_turns=int(max_turns),
+            mcts_sims=int(mcts_sims),
+        )
     replay_out_dir = Path("nn_artifacts/replay")
     rolling_replay_state_path = replay_out_dir / f"{run_id}_replay_latest.npz"
     last_saved_replay_path: Path | None = None
@@ -1486,7 +1509,7 @@ def run_cycles(
                     model=selfplay_source_model,
                     seed_start=next_episode_seed,
                     mcts_config=mcts_config,
-                    workers=min(int(configured_workers), int(episodes_per_cycle)),
+                    workers=int(configured_workers),
                     worker_pool=parallel_worker_pool,
                     checkpoint_path_override=checkpoint_path_override,
                 )
@@ -2219,6 +2242,7 @@ def run_checkpoint_benchmark(
     benchmark_seed: int = 42,
     benchmark_cycle_idx: int = 0,
     benchmark_workers: int = 1,
+    mcts_tree_workers: int | None = None,
 ) -> dict[str, object]:
     if not str(candidate_checkpoint):
         raise ValueError("candidate_checkpoint is required")
@@ -2228,6 +2252,7 @@ def run_checkpoint_benchmark(
         raise ValueError("benchmark_mcts_sims must be positive")
     if benchmark_workers <= 0:
         raise ValueError("benchmark_workers must be positive")
+    _configure_mcts_tree_workers(mcts_tree_workers)
 
     eval_mcts_config = MCTSConfig(
         num_simulations=int(benchmark_mcts_sims),
@@ -2306,6 +2331,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--mcts-root-dirichlet-noise", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--mcts-root-dirichlet-epsilon", type=float, default=0.25)
     p.add_argument("--mcts-root-dirichlet-alpha-total", type=float, default=10.0)
+    p.add_argument("--mcts-tree-workers", type=int, default=None)
     p.add_argument("--candidate-checkpoint", type=str, default=None)
     p.add_argument("--save-checkpoint-every-cycles", type=int, default=0)
     p.add_argument("--save-every-checkpoint", action="store_true")
@@ -2367,6 +2393,7 @@ def main() -> None:
             mcts_root_dirichlet_noise=args.mcts_root_dirichlet_noise,
             mcts_root_dirichlet_epsilon=args.mcts_root_dirichlet_epsilon,
             mcts_root_dirichlet_alpha_total=args.mcts_root_dirichlet_alpha_total,
+            mcts_tree_workers=args.mcts_tree_workers,
             visualize=args.visualize,
             viz_dir=args.viz_dir,
             viz_run_name=args.viz_run_name,
@@ -2393,6 +2420,7 @@ def main() -> None:
             mcts_root_dirichlet_noise=args.mcts_root_dirichlet_noise,
             mcts_root_dirichlet_epsilon=args.mcts_root_dirichlet_epsilon,
             mcts_root_dirichlet_alpha_total=args.mcts_root_dirichlet_alpha_total,
+            mcts_tree_workers=args.mcts_tree_workers,
             save_checkpoint_every_cycles=args.save_checkpoint_every_cycles,
             save_every_checkpoint=args.save_every_checkpoint,
             checkpoint_dir=args.checkpoint_dir,
@@ -2441,6 +2469,7 @@ def main() -> None:
             benchmark_seed=int(args.seed if args.benchmark_seed is None else args.benchmark_seed),
             benchmark_cycle_idx=args.benchmark_cycle_idx,
             benchmark_workers=args.benchmark_workers,
+            mcts_tree_workers=args.mcts_tree_workers,
         )
     print("Run complete")
     for k in sorted(metrics.keys()):

@@ -29,6 +29,7 @@ class MCTSResult:
     chosen_action_idx: int
     visit_probs: np.ndarray  # (69,) float32
     root_value: float
+    root_best_value: float
 
 
 def run_mcts(
@@ -124,4 +125,5 @@ def run_mcts(
         chosen_action_idx=int(native_result.chosen_action_idx),
         visit_probs=visit_probs,
         root_value=float(native_result.root_value),
+        root_best_value=float(native_result.root_best_value),
     )
