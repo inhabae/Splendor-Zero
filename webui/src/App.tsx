@@ -12,6 +12,7 @@ import {
   SelfPlaySessionSummaryDTO,
 } from './types';
 import { GameBoard } from './components/board/GameBoard';
+import { ActionLabel } from './components/ActionLabel';
 
 type UiStatus = 'IDLE' | 'WAITING_ENGINE' | 'WAITING_PLAYER' | 'GAME_OVER';
 
@@ -467,7 +468,8 @@ export function App() {
                 {snapshot.legal_action_details.map((action) => (
                   <li key={action.action_idx}>
                     <button disabled={!canMove} onClick={() => void onPlayerMove(action.action_idx)}>
-                      [{action.action_idx}] {action.label}
+                      <span className="action-idx-pill">{action.action_idx}</span>
+                      <ActionLabel actionIdx={action.action_idx} board={snapshot.board_state} />
                     </button>
                   </li>
                 ))}
@@ -624,7 +626,8 @@ export function App() {
               Session: <strong>{replayStep.session_id}</strong> | Episode: <strong>{replayStep.episode_idx}</strong> | Step: <strong>{replayStep.step_idx}</strong>
             </p>
             <p>
-              Value target: <strong>{replayStep.value_target.toFixed(3)}</strong> | MCTS root value: <strong>{replayStep.value_root.toFixed(3)}</strong> | Model value:{' '}
+              Value target: <strong>{replayStep.value_target.toFixed(3)}</strong> | Best-root Q: <strong>{replayStep.value_root_best.toFixed(3)}</strong> | MCTS root value:{' '}
+              <strong>{replayStep.value_root.toFixed(3)}</strong> | Model value:{' '}
               <strong>{replayStep.model_value == null ? 'N/A' : replayStep.model_value.toFixed(3)}</strong>
             </p>
             <p>
@@ -637,10 +640,8 @@ export function App() {
                   <tr>
                     <th>Idx</th>
                     <th>Action</th>
-                    <th>MCTS Policy</th>
-                    <th>Model Policy</th>
-                    <th>MCTS Bar</th>
-                    <th>Model Bar</th>
+                    <th>MCTS</th>
+                    <th>Model</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -652,22 +653,28 @@ export function App() {
                       key={`viz-${action.action_idx}`}
                       className={`action-row ${action.is_selected ? 'selected' : ''} ${isMctsBest ? 'mcts-best' : ''} ${isModelBest ? 'model-best' : ''}`}
                     >
-                      <td>{action.action_idx}</td>
-                      <td>{action.label}</td>
+                      <td className="action-idx-cell">{action.action_idx}</td>
                       <td>
-                        {(action.policy_prob * 100).toFixed(2)}%
+                        <ActionLabel
+                          actionIdx={action.action_idx}
+                          board={replayStep.board_state}
+                          showPlayed={action.is_selected}
+                        />
                       </td>
                       <td>
-                        {(modelProb * 100).toFixed(2)}%
-                      </td>
-                      <td>
-                        <div className="policy-bar">
-                          <span style={{ width: `${Math.max(0, Math.min(100, action.policy_prob * 100))}%` }} />
+                        <div className="policy-cell">
+                          <span className="policy-value">{(action.policy_prob * 100).toFixed(2)}%</span>
+                          <div className="policy-bar">
+                            <span style={{ width: `${Math.max(0, Math.min(100, action.policy_prob * 100))}%` }} />
+                          </div>
                         </div>
                       </td>
                       <td>
-                        <div className="policy-bar">
-                          <span style={{ width: `${Math.max(0, Math.min(100, modelProb * 100))}%` }} />
+                        <div className="policy-cell">
+                          <span className="policy-value">{(modelProb * 100).toFixed(2)}%</span>
+                          <div className="policy-bar">
+                            <span style={{ width: `${Math.max(0, Math.min(100, modelProb * 100))}%` }} />
+                          </div>
                         </div>
                       </td>
                     </tr>

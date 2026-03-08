@@ -6,8 +6,7 @@ export function CardView({ card, showMcts = false, showModel = false }: { card: 
   const isPrivate = card.source === 'reserved_private';
   const summary = `Card ${card.bonus_color} bonus, ${card.points} points`;
   const reqs = COST_ORDER.filter((color) => card.cost[color] > 0);
-  const bonusLabel =
-    card.bonus_color === 'black' ? '+' : card.bonus_color === 'white' ? '▼' : card.bonus_color[0].toUpperCase();
+  const bonusLabel = card.bonus_color === 'black' ? 'K' : card.bonus_color === 'white' ? 'W' : card.bonus_color[0].toUpperCase();
   return (
     <article className={`card-view card-${card.bonus_color} ${isPrivate ? 'card-private' : ''}`} aria-label={summary}>
       <header className="card-head">
@@ -24,7 +23,7 @@ export function CardView({ card, showMcts = false, showModel = false }: { card: 
         {reqs.map((color) => (
           <span key={color} className={`cost-chip cost-circle token-${color}`}>
             <b>{card.cost[color]}</b>
-            <small>{color === 'black' ? '+' : color === 'white' ? '▼' : color[0].toUpperCase()}</small>
+            <small>{color === 'black' ? 'K' : color === 'white' ? 'W' : color[0].toUpperCase()}</small>
           </span>
         ))}
       </div>

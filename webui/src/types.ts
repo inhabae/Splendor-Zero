@@ -181,6 +181,7 @@ export interface ReplayStepDTO {
   reached_cutoff: boolean;
   value_target: number;
   value_root: number;
+  value_root_best: number;
   model_value?: number | null;
   action_selected: number;
   board_state: BoardStateDTO;
