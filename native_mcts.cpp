@@ -137,11 +137,12 @@ void apply_dirichlet_root_noise(
     }
 }
 
-int forced_playout_target_visits(float total_parent_visits, float k) {
-    if (!(k > 0.0f) || !(total_parent_visits > 0.0f)) {
+int forced_playout_target_visits_for_child(float total_parent_visits, float k, float prior) {
+    if (!(k > 0.0f) || !(total_parent_visits > 0.0f) || !(prior > 0.0f) || !std::isfinite(static_cast<double>(prior))) {
         return 0;
     }
-    const double target = std::sqrt(static_cast<double>(total_parent_visits)) / static_cast<double>(k);
+    const double target =
+        std::sqrt(static_cast<double>(k) * static_cast<double>(prior) * static_cast<double>(total_parent_visits));
     if (!(target > 0.0) || !std::isfinite(target)) {
         return 0;
     }
@@ -178,9 +179,6 @@ int select_puct_action(
     for (int i = 0; i < kActionDim; ++i) {
         parent_n += static_cast<float>(node.visit_count[static_cast<std::size_t>(i)]);
     }
-    const int n_forced = (use_forced_playouts && node_index == 0) ? forced_playout_target_visits(parent_n, forced_playouts_k)
-                                                                   : 0;
-
     int best_action = -1;
     bool best_forced = false;
     float best_score = -std::numeric_limits<float>::infinity();
@@ -193,6 +191,13 @@ int select_puct_action(
             continue;
         }
         const int n = node.visit_count[static_cast<std::size_t>(action)];
+        const int n_forced = (use_forced_playouts && node_index == 0)
+                                 ? forced_playout_target_visits_for_child(
+                                       parent_n,
+                                       forced_playouts_k,
+                                       node.priors[static_cast<std::size_t>(action)]
+                                   )
+                                 : 0;
         const bool forced = n_forced > 0 && n < n_forced;
         const float score = puct_score_for_action(node, action, parent_n, c_puct, eps);
         if (best_action < 0 || (forced && !best_forced) || (forced == best_forced && score > best_score)) {
@@ -232,9 +237,6 @@ int select_puct_action_with_pending_flags(
     for (int i = 0; i < kActionDim; ++i) {
         parent_n += static_cast<float>(node.visit_count[static_cast<std::size_t>(i)]);
     }
-    const int n_forced = (use_forced_playouts && node_index == 0) ? forced_playout_target_visits(parent_n, forced_playouts_k)
-                                                                   : 0;
-
     int best_action = -1;
     bool best_forced = false;
     float best_score = -std::numeric_limits<float>::infinity();
@@ -248,6 +250,13 @@ int select_puct_action_with_pending_flags(
             continue;
         }
         const int n = node.visit_count[static_cast<std::size_t>(action)];
+        const int n_forced = (use_forced_playouts && node_index == 0)
+                                 ? forced_playout_target_visits_for_child(
+                                       parent_n,
+                                       forced_playouts_k,
+                                       node.priors[static_cast<std::size_t>(action)]
+                                   )
+                                 : 0;
         const bool forced = n_forced > 0 && n < n_forced;
         const float score = puct_score_for_action(node, action, parent_n, c_puct, eps);
         if (best_action < 0 || (forced && !best_forced) || (forced == best_forced && score > best_score)) {
@@ -390,11 +399,6 @@ std::array<float, kActionDim> prune_policy_target_visit_probs(
         return visit_probs_from_counts(root, legal_mask);
     }
 
-    const int n_forced = forced_playout_target_visits(static_cast<float>(total_root_visits), forced_playouts_k);
-    if (n_forced <= 0) {
-        return visit_probs_from_counts(root, legal_mask);
-    }
-
     const float total_visits_f = static_cast<float>(total_root_visits);
     const float best_score = puct_score_for_action(root, best_action, total_visits_f, c_puct, eps);
 
@@ -404,6 +408,14 @@ std::array<float, kActionDim> prune_policy_target_visit_probs(
         }
         const int n = root.visit_count[static_cast<std::size_t>(a)];
         if (n <= 0) {
+            continue;
+        }
+        const int n_forced = forced_playout_target_visits_for_child(
+            total_visits_f,
+            forced_playouts_k,
+            root.priors[static_cast<std::size_t>(a)]
+        );
+        if (n_forced <= 0) {
             continue;
         }
         const int n_reduced = std::max(1, n - n_forced);
