@@ -10,4 +10,5 @@ def winner_to_value_for_player(winner: int, player_id: int) -> float:
 
 
 def blend_root_and_outcome(value_root: float, value_outcome: float) -> float:
-    return 0.5 * (float(value_root) + float(value_outcome))
+    _ = value_root  # Keep signature stable for existing call sites.
+    return float(value_outcome)

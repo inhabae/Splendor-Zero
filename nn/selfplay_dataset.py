@@ -191,7 +191,7 @@ def run_selfplay_session(
                         state=state.state.copy(),
                         mask=state.mask.copy(),
                         policy=policy,
-                        value_target=0.0,  # Filled after episode outcome/root-value blend is known.
+                        value_target=0.0,  # Filled after episode outcome is known.
                         value_root=float(mcts_result.root_value),
                         value_root_best=float(mcts_result.root_best_value),
                         action_selected=action,
