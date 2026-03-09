@@ -1,5 +1,14 @@
 
 nn/__*
+*.jsonl
+*.pt
+*.png
+*.json
+*.txt
+*.prof
+*.npz
+scripts/
+tests/
 
 # Python caches
 __pycache__/
