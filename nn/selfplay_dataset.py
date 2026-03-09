@@ -18,6 +18,7 @@ from .checkpoints import load_checkpoint
 from .mcts import MCTSConfig, run_mcts
 from .native_env import SplendorNativeEnv
 from .state_schema import ACTION_DIM, STATE_DIM
+from .value_targets import blend_root_and_outcome, winner_to_value_for_player
 
 _WORKER_RUNTIME_CONFIGURED = False
 
@@ -51,16 +52,6 @@ class SelfPlaySession:
     def games(self) -> int:
         value = self.metadata.get("games", 0)
         return int(value)
-
-
-def _winner_to_value_for_player(winner: int, player_id: int) -> float:
-    if winner == -1:
-        return 0.0
-    return 1.0 if int(winner) == int(player_id) else -1.0
-
-
-def _blend_root_and_outcome(value_root: float, value_outcome: float) -> float:
-    return 0.5 * (float(value_root) + float(value_outcome))
 
 
 def _resolve_playout_cap_settings(
@@ -222,8 +213,8 @@ def run_selfplay_session(
             winner = -1
 
         for step in episode_steps:
-            value_outcome = _winner_to_value_for_player(winner, step.player_id)
-            step.value_target = _blend_root_and_outcome(step.value_root_best, value_outcome)
+            value_outcome = winner_to_value_for_player(winner, step.player_id)
+            step.value_target = blend_root_and_outcome(step.value_root_best, value_outcome)
             step.winner = int(winner)
             step.reached_cutoff = bool(reached_cutoff)
             all_steps.append(step)

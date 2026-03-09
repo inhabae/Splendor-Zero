@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import random
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -25,13 +26,14 @@ class ReplayBuffer:
     def __init__(self, max_size: int | None = None) -> None:
         if max_size is not None and max_size <= 0:
             raise ValueError("max_size must be positive when provided")
-        self._samples: List[ReplaySample] = []
         self._max_size = int(max_size) if max_size is not None else None
+        self._samples: deque[ReplaySample] = deque(maxlen=self._max_size)
 
     def __len__(self) -> int:
         return len(self._samples)
 
-    def add(self, sample: ReplaySample) -> None:
+    @staticmethod
+    def _validate_sample(sample: ReplaySample) -> None:
         if sample.state.shape != (STATE_DIM,):
             raise ValueError(f"Invalid state shape {sample.state.shape}")
         if sample.mask.shape != (ACTION_DIM,):
@@ -56,10 +58,10 @@ class ReplayBuffer:
         prob_sum = float(sample.policy_target.sum())
         if abs(prob_sum - 1.0) > 1e-5:
             raise ValueError(f"policy_target must sum to 1 (got {prob_sum})")
+
+    def add(self, sample: ReplaySample) -> None:
+        self._validate_sample(sample)
         self._samples.append(sample)
-        if self._max_size is not None and len(self._samples) > self._max_size:
-            overflow = len(self._samples) - self._max_size
-            del self._samples[:overflow]
 
     def extend(self, samples: Sequence[ReplaySample]) -> None:
         for s in samples:
@@ -70,7 +72,7 @@ class ReplayBuffer:
             raise ValueError("ReplayBuffer is empty")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        picks = random.sample(self._samples, k=min(batch_size, len(self._samples)))
+        picks = random.sample(tuple(self._samples), k=min(batch_size, len(self._samples)))
         states = np.stack([s.state for s in picks], axis=0).astype(np.float32, copy=False)
         masks = np.stack([s.mask for s in picks], axis=0).astype(np.bool_, copy=False)
         actions = np.asarray([s.action_target for s in picks], dtype=np.int64)
@@ -156,14 +158,15 @@ class ReplayBuffer:
             raise ValueError("Replay arrays have mismatched leading dimensions")
 
         out = cls(max_size=max_size)
-        for i in range(n):
-            out.add(
-                ReplaySample(
-                    state=states[i].copy(),
-                    mask=masks[i].copy(),
-                    action_target=int(actions[i]),
-                    value_target=float(values[i]),
-                    policy_target=policies[i].copy(),
-                )
+        samples = [
+            ReplaySample(
+                state=states[i].copy(),
+                mask=masks[i].copy(),
+                action_target=int(actions[i]),
+                value_target=float(values[i]),
+                policy_target=policies[i].copy(),
             )
+            for i in range(n)
+        ]
+        out.extend(samples)
         return out

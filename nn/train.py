@@ -36,6 +36,7 @@ from .opponents import CheckpointMCTSOpponent, GreedyHeuristicOpponent, ModelMCT
 from .replay import ReplayBuffer, ReplaySample
 from .selfplay_dataset import SelfPlayWorkerPool, run_selfplay_session_parallel
 from .state_schema import ACTION_DIM, STATE_DIM
+from .value_targets import blend_root_and_outcome, winner_to_value_for_player
 
 try:
     from .metrics_viz import MetricsVizLogger
@@ -131,18 +132,6 @@ class EpisodeSummary:
     num_turns: int
     reached_cutoff: bool
     winner: int  # -1 draw, 0/1 winner
-
-
-def _winner_to_value_for_player(winner: int, player_id: int) -> float:
-    if winner == -1:
-        return 0.0
-    if winner not in (0, 1):
-        raise ValueError(f"Unexpected winner value {winner}")
-    return 1.0 if winner == player_id else -1.0
-
-
-def _blend_root_and_outcome(value_root: float, value_outcome: float) -> float:
-    return 0.5 * (float(value_root) + float(value_outcome))
 
 
 @dataclass
@@ -503,13 +492,13 @@ def collect_episode(
         reached_cutoff = True
 
     for step in episode_steps:
-        value_outcome = _winner_to_value_for_player(winner, step.player_id)
+        value_outcome = winner_to_value_for_player(winner, step.player_id)
         replay.add(
             ReplaySample(
                 state=step.state,
                 mask=step.mask,
                 action_target=step.action_target,
-                value_target=_blend_root_and_outcome(step.value_root, value_outcome),
+                value_target=blend_root_and_outcome(step.value_root, value_outcome),
                 policy_target=step.policy_target,
             )
         )
