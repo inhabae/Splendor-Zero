@@ -373,7 +373,9 @@ public:
         float root_dirichlet_epsilon = 0.25f,
         float root_dirichlet_alpha_total = 10.0f,
         int eval_batch_size = 32,
-        std::uint64_t rng_seed = 0
+        std::uint64_t rng_seed = 0,
+        bool use_forced_playouts = false,
+        float forced_playouts_k = 2.0f
     ) const {
         ensure_initialized();
         return run_native_mcts(
@@ -389,7 +391,9 @@ public:
             root_dirichlet_epsilon,
             root_dirichlet_alpha_total,
             eval_batch_size,
-            rng_seed
+            rng_seed,
+            use_forced_playouts,
+            forced_playouts_k
         );
     }
 
@@ -472,6 +476,8 @@ PYBIND11_MODULE(splendor_native, m) {
             py::arg("root_dirichlet_epsilon") = 0.25f,
             py::arg("root_dirichlet_alpha_total") = 10.0f,
             py::arg("eval_batch_size") = 32,
-            py::arg("rng_seed") = static_cast<std::uint64_t>(0)
+            py::arg("rng_seed") = static_cast<std::uint64_t>(0),
+            py::arg("use_forced_playouts") = false,
+            py::arg("forced_playouts_k") = 2.0f
         );
 }

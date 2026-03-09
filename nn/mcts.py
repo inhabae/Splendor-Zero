@@ -22,6 +22,8 @@ class MCTSConfig:
     root_dirichlet_epsilon: float = 0.25
     root_dirichlet_alpha_total: float = 10.0
     eval_batch_size: int = 32
+    use_forced_playouts: bool = False
+    forced_playouts_k: float = 2.0
 
 
 @dataclass
@@ -56,6 +58,8 @@ def run_mcts(
         raise ValueError("root_dirichlet_alpha_total must be positive")
     if int(cfg.eval_batch_size) <= 0:
         raise ValueError("eval_batch_size must be positive")
+    if float(cfg.forced_playouts_k) <= 0.0:
+        raise ValueError("forced_playouts_k must be positive")
     if state.is_terminal:
         raise ValueError("run_mcts called on terminal state")
 
@@ -111,6 +115,8 @@ def run_mcts(
         root_dirichlet_epsilon=float(cfg.root_dirichlet_epsilon),
         eval_batch_size=int(cfg.eval_batch_size),
         rng_seed=rng_seed,
+        use_forced_playouts=bool(cfg.use_forced_playouts),
+        forced_playouts_k=float(cfg.forced_playouts_k),
     )
     native_result = env.run_mcts_native(
         **native_kwargs,

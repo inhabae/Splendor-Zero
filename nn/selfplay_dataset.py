@@ -96,6 +96,8 @@ def run_selfplay_session(
     full_search_sims: int | None = None,
     fast_search_sims: int | None = None,
     full_search_prob: float | None = None,
+    use_forced_playouts: bool = True,
+    forced_playouts_k: float = 2.0,
 ) -> SelfPlaySession:
     if games <= 0:
         raise ValueError("games must be positive")
@@ -103,6 +105,8 @@ def run_selfplay_session(
         raise ValueError("max_turns must be positive")
     if num_simulations <= 0:
         raise ValueError("num_simulations must be positive")
+    if forced_playouts_k <= 0.0:
+        raise ValueError("forced_playouts_k must be positive")
     (
         playout_cap_randomization_enabled,
         resolved_full_search_sims,
@@ -124,6 +128,8 @@ def run_selfplay_session(
         temperature_moves=10,
         temperature=1.0,
         root_dirichlet_noise=bool(playout_cap_randomization_enabled),
+        use_forced_playouts=bool(use_forced_playouts),
+        forced_playouts_k=float(forced_playouts_k),
     )
     fast_search_config = MCTSConfig(
         num_simulations=int(resolved_fast_search_sims),
@@ -131,6 +137,8 @@ def run_selfplay_session(
         temperature_moves=10,
         temperature=1.0,
         root_dirichlet_noise=False,
+        use_forced_playouts=bool(use_forced_playouts),
+        forced_playouts_k=float(forced_playouts_k),
     )
 
     all_steps: list[SelfPlayStep] = []
@@ -229,6 +237,9 @@ def run_selfplay_session(
         "full_search_sims": int(resolved_full_search_sims),
         "fast_search_sims": int(resolved_fast_search_sims),
         "full_search_prob": float(resolved_full_search_prob),
+        "use_forced_playouts": bool(use_forced_playouts),
+        "k": float(forced_playouts_k),
+        "forced_playouts_k": float(forced_playouts_k),
         "seed_base": int(seed_base),
     }
     return SelfPlaySession(
@@ -375,6 +386,8 @@ def _run_selfplay_worker_task(
     full_search_sims: int | None = None,
     fast_search_sims: int | None = None,
     full_search_prob: float | None = None,
+    use_forced_playouts: bool = True,
+    forced_playouts_k: float = 2.0,
 ) -> dict[str, Any]:
     worker_t0 = time.perf_counter()
     # Avoid mutating parent-process BLAS/PyTorch thread settings when this code
@@ -396,6 +409,8 @@ def _run_selfplay_worker_task(
             full_search_sims=full_search_sims,
             fast_search_sims=fast_search_sims,
             full_search_prob=full_search_prob,
+            use_forced_playouts=bool(use_forced_playouts),
+            forced_playouts_k=float(forced_playouts_k),
         )
     selfplay_elapsed = time.perf_counter() - selfplay_t0
     pack_t0 = time.perf_counter()
@@ -475,6 +490,8 @@ class SelfPlayWorkerPool:
         full_search_sims: int | None = None,
         fast_search_sims: int | None = None,
         full_search_prob: float | None = None,
+        use_forced_playouts: bool = True,
+        forced_playouts_k: float = 2.0,
     ) -> SelfPlaySession:
         return _run_selfplay_session_parallel_impl(
             checkpoint_path=checkpoint_path,
@@ -486,6 +503,8 @@ class SelfPlayWorkerPool:
             full_search_sims=full_search_sims,
             fast_search_sims=fast_search_sims,
             full_search_prob=full_search_prob,
+            use_forced_playouts=use_forced_playouts,
+            forced_playouts_k=forced_playouts_k,
             executor=self._ensure_executor(),
             max_workers=self._max_workers,
         )
@@ -502,6 +521,8 @@ def _run_selfplay_session_parallel_impl(
     full_search_sims: int | None = None,
     fast_search_sims: int | None = None,
     full_search_prob: float | None = None,
+    use_forced_playouts: bool = True,
+    forced_playouts_k: float = 2.0,
     executor: ProcessPoolExecutor | None = None,
     max_workers: int | None = None,
 ) -> SelfPlaySession:
@@ -514,6 +535,8 @@ def _run_selfplay_session_parallel_impl(
         raise ValueError("num_simulations must be positive")
     if workers <= 0:
         raise ValueError("workers must be positive")
+    if forced_playouts_k <= 0.0:
+        raise ValueError("forced_playouts_k must be positive")
     (
         playout_cap_randomization_enabled,
         resolved_full_search_sims,
@@ -561,6 +584,8 @@ def _run_selfplay_session_parallel_impl(
             full_search_sims=full_search_sims,
             fast_search_sims=fast_search_sims,
             full_search_prob=full_search_prob,
+            use_forced_playouts=bool(use_forced_playouts),
+            forced_playouts_k=float(forced_playouts_k),
         )
     elif not using_external_executor:
         futures = {}
@@ -581,6 +606,8 @@ def _run_selfplay_session_parallel_impl(
                     full_search_sims=full_search_sims,
                     fast_search_sims=fast_search_sims,
                     full_search_prob=full_search_prob,
+                    use_forced_playouts=bool(use_forced_playouts),
+                    forced_playouts_k=float(forced_playouts_k),
                 )
                 futures[fut] = worker_idx
             for fut in as_completed(futures):
@@ -606,6 +633,8 @@ def _run_selfplay_session_parallel_impl(
                 full_search_sims=full_search_sims,
                 fast_search_sims=fast_search_sims,
                 full_search_prob=full_search_prob,
+                use_forced_playouts=bool(use_forced_playouts),
+                forced_playouts_k=float(forced_playouts_k),
             )
             futures[fut] = worker_idx
         for fut in as_completed(futures):
@@ -668,6 +697,9 @@ def _run_selfplay_session_parallel_impl(
         "full_search_sims": int(resolved_full_search_sims),
         "fast_search_sims": int(resolved_fast_search_sims),
         "full_search_prob": float(resolved_full_search_prob),
+        "use_forced_playouts": bool(use_forced_playouts),
+        "k": float(forced_playouts_k),
+        "forced_playouts_k": float(forced_playouts_k),
         "seed_base": int(seed_base),
         "workers_requested": int(workers),
         "workers_used": int(workers_used),
@@ -706,6 +738,8 @@ def run_selfplay_session_parallel(
     full_search_sims: int | None = None,
     fast_search_sims: int | None = None,
     full_search_prob: float | None = None,
+    use_forced_playouts: bool = True,
+    forced_playouts_k: float = 2.0,
 ) -> SelfPlaySession:
     return _run_selfplay_session_parallel_impl(
         checkpoint_path=checkpoint_path,
@@ -717,6 +751,8 @@ def run_selfplay_session_parallel(
         full_search_sims=full_search_sims,
         fast_search_sims=fast_search_sims,
         full_search_prob=full_search_prob,
+        use_forced_playouts=use_forced_playouts,
+        forced_playouts_k=forced_playouts_k,
     )
 
 

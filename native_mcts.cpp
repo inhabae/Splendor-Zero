@@ -137,21 +137,52 @@ void apply_dirichlet_root_noise(
     }
 }
 
+int forced_playout_target_visits(float total_parent_visits, float k) {
+    if (!(k > 0.0f) || !(total_parent_visits > 0.0f)) {
+        return 0;
+    }
+    const double target = std::sqrt(static_cast<double>(total_parent_visits)) / static_cast<double>(k);
+    if (!(target > 0.0) || !std::isfinite(target)) {
+        return 0;
+    }
+    return std::max(0, static_cast<int>(std::floor(target)));
+}
+
+float puct_score_for_action(
+    const MCTSNode& node,
+    int action,
+    float total_parent_visits,
+    float c_puct,
+    float eps,
+    int override_n = -1
+) {
+    const int raw_n = node.visit_count[static_cast<std::size_t>(action)];
+    const float n = static_cast<float>((override_n >= 0) ? override_n : raw_n);
+    const float q = (raw_n <= 0) ? 0.0f : (node.value_sum[static_cast<std::size_t>(action)] / static_cast<float>(raw_n));
+    const float sqrt_parent = std::sqrt(total_parent_visits + eps);
+    const float u = c_puct * node.priors[static_cast<std::size_t>(action)] * sqrt_parent / (1.0f + n);
+    return q + u;
+}
+
 int select_puct_action(
     const std::vector<MCTSNode>& nodes,
     int node_index,
     const std::array<std::uint8_t, kActionDim>& legal_mask,
     float c_puct,
-    float eps
+    float eps,
+    bool use_forced_playouts,
+    float forced_playouts_k
 ) {
     const MCTSNode& node = nodes[static_cast<std::size_t>(node_index)];
     float parent_n = 0.0f;
     for (int i = 0; i < kActionDim; ++i) {
         parent_n += static_cast<float>(node.visit_count[static_cast<std::size_t>(i)]);
     }
-    const float sqrt_parent = std::sqrt(parent_n + eps);
+    const int n_forced = (use_forced_playouts && node_index == 0) ? forced_playout_target_visits(parent_n, forced_playouts_k)
+                                                                   : 0;
 
     int best_action = -1;
+    bool best_forced = false;
     float best_score = -std::numeric_limits<float>::infinity();
     for (int action = 0; action < kActionDim; ++action) {
         if (legal_mask[static_cast<std::size_t>(action)] == 0) {
@@ -161,13 +192,13 @@ int select_puct_action(
         if (child_idx >= 0 && nodes[static_cast<std::size_t>(child_idx)].pending_eval) {
             continue;
         }
-        const float n = static_cast<float>(node.visit_count[static_cast<std::size_t>(action)]);
-        const float q = (n <= 0.0f) ? 0.0f : (node.value_sum[static_cast<std::size_t>(action)] / n);
-        const float u = c_puct * node.priors[static_cast<std::size_t>(action)] * sqrt_parent / (1.0f + n);
-        const float score = q + u;
-        if (score > best_score) {
+        const int n = node.visit_count[static_cast<std::size_t>(action)];
+        const bool forced = n_forced > 0 && n < n_forced;
+        const float score = puct_score_for_action(node, action, parent_n, c_puct, eps);
+        if (best_action < 0 || (forced && !best_forced) || (forced == best_forced && score > best_score)) {
             best_score = score;
             best_action = action;
+            best_forced = forced;
         }
     }
     return best_action;
@@ -189,18 +220,23 @@ int resolve_tree_worker_limit() {
 
 int select_puct_action_with_pending_flags(
     const MCTSNode& node,
+    int node_index,
     const std::array<std::uint8_t, kActionDim>& legal_mask,
     float c_puct,
     float eps,
-    const std::atomic_uint8_t* pending_flags
+    const std::atomic_uint8_t* pending_flags,
+    bool use_forced_playouts,
+    float forced_playouts_k
 ) {
     float parent_n = 0.0f;
     for (int i = 0; i < kActionDim; ++i) {
         parent_n += static_cast<float>(node.visit_count[static_cast<std::size_t>(i)]);
     }
-    const float sqrt_parent = std::sqrt(parent_n + eps);
+    const int n_forced = (use_forced_playouts && node_index == 0) ? forced_playout_target_visits(parent_n, forced_playouts_k)
+                                                                   : 0;
 
     int best_action = -1;
+    bool best_forced = false;
     float best_score = -std::numeric_limits<float>::infinity();
     for (int action = 0; action < kActionDim; ++action) {
         if (legal_mask[static_cast<std::size_t>(action)] == 0) {
@@ -211,13 +247,13 @@ int select_puct_action_with_pending_flags(
             pending_flags[static_cast<std::size_t>(child_idx)].load(std::memory_order_acquire) != 0U) {
             continue;
         }
-        const float n = static_cast<float>(node.visit_count[static_cast<std::size_t>(action)]);
-        const float q = (n <= 0.0f) ? 0.0f : (node.value_sum[static_cast<std::size_t>(action)] / n);
-        const float u = c_puct * node.priors[static_cast<std::size_t>(action)] * sqrt_parent / (1.0f + n);
-        const float score = q + u;
-        if (score > best_score) {
+        const int n = node.visit_count[static_cast<std::size_t>(action)];
+        const bool forced = n_forced > 0 && n < n_forced;
+        const float score = puct_score_for_action(node, action, parent_n, c_puct, eps);
+        if (best_action < 0 || (forced && !best_forced) || (forced == best_forced && score > best_score)) {
             best_score = score;
             best_action = action;
+            best_forced = forced;
         }
     }
     return best_action;
@@ -285,6 +321,122 @@ int sample_action_from_visits(
     return legal[static_cast<std::size_t>(dist(rng))];
 }
 
+std::array<float, kActionDim> visit_probs_from_counts(
+    const MCTSNode& root,
+    const std::array<std::uint8_t, kActionDim>& legal_mask
+) {
+    std::array<float, kActionDim> probs{};
+    double total_visits = 0.0;
+    int legal_count = 0;
+    for (int a = 0; a < kActionDim; ++a) {
+        if (legal_mask[static_cast<std::size_t>(a)] != 0) {
+            total_visits += static_cast<double>(root.visit_count[static_cast<std::size_t>(a)]);
+            ++legal_count;
+        }
+    }
+    if (total_visits > 0.0) {
+        for (int a = 0; a < kActionDim; ++a) {
+            probs[static_cast<std::size_t>(a)] =
+                (legal_mask[static_cast<std::size_t>(a)] != 0)
+                    ? static_cast<float>(static_cast<double>(root.visit_count[static_cast<std::size_t>(a)]) / total_visits)
+                    : 0.0f;
+        }
+    } else {
+        const float u = legal_count > 0 ? (1.0f / static_cast<float>(legal_count)) : 0.0f;
+        for (int a = 0; a < kActionDim; ++a) {
+            probs[static_cast<std::size_t>(a)] = (legal_mask[static_cast<std::size_t>(a)] != 0) ? u : 0.0f;
+        }
+    }
+
+    double prob_sum = 0.0;
+    for (int a = 0; a < kActionDim; ++a) {
+        if (legal_mask[static_cast<std::size_t>(a)] == 0) {
+            probs[static_cast<std::size_t>(a)] = 0.0f;
+        }
+        prob_sum += static_cast<double>(probs[static_cast<std::size_t>(a)]);
+    }
+    if (prob_sum > 0.0 && std::isfinite(prob_sum)) {
+        for (int a = 0; a < kActionDim; ++a) {
+            probs[static_cast<std::size_t>(a)] =
+                static_cast<float>(static_cast<double>(probs[static_cast<std::size_t>(a)]) / prob_sum);
+        }
+    }
+    return probs;
+}
+
+std::array<float, kActionDim> prune_policy_target_visit_probs(
+    const MCTSNode& root,
+    const std::array<std::uint8_t, kActionDim>& legal_mask,
+    float c_puct,
+    float eps,
+    float forced_playouts_k
+) {
+    std::array<int, kActionDim> pruned_counts = root.visit_count;
+    int total_root_visits = 0;
+    int best_action = -1;
+    int best_visits = -1;
+    for (int a = 0; a < kActionDim; ++a) {
+        if (legal_mask[static_cast<std::size_t>(a)] == 0) {
+            continue;
+        }
+        const int n = root.visit_count[static_cast<std::size_t>(a)];
+        total_root_visits += n;
+        if (n > best_visits) {
+            best_visits = n;
+            best_action = a;
+        }
+    }
+    if (best_action < 0 || total_root_visits <= 0) {
+        return visit_probs_from_counts(root, legal_mask);
+    }
+
+    const int n_forced = forced_playout_target_visits(static_cast<float>(total_root_visits), forced_playouts_k);
+    if (n_forced <= 0) {
+        return visit_probs_from_counts(root, legal_mask);
+    }
+
+    const float total_visits_f = static_cast<float>(total_root_visits);
+    const float best_score = puct_score_for_action(root, best_action, total_visits_f, c_puct, eps);
+
+    for (int a = 0; a < kActionDim; ++a) {
+        if (a == best_action || legal_mask[static_cast<std::size_t>(a)] == 0) {
+            continue;
+        }
+        const int n = root.visit_count[static_cast<std::size_t>(a)];
+        if (n <= 0) {
+            continue;
+        }
+        const int n_reduced = std::max(1, n - n_forced);
+        const float reduced_score = puct_score_for_action(root, a, total_visits_f, c_puct, eps, n_reduced);
+        if (reduced_score < best_score) {
+            const int after_subtract = n - n_forced;
+            pruned_counts[static_cast<std::size_t>(a)] = (after_subtract <= 1) ? 0 : after_subtract;
+        }
+    }
+
+    std::array<float, kActionDim> probs{};
+    double total_pruned = 0.0;
+    for (int a = 0; a < kActionDim; ++a) {
+        if (legal_mask[static_cast<std::size_t>(a)] == 0) {
+            continue;
+        }
+        total_pruned += static_cast<double>(std::max(0, pruned_counts[static_cast<std::size_t>(a)]));
+    }
+    if (!(total_pruned > 0.0) || !std::isfinite(total_pruned)) {
+        probs[static_cast<std::size_t>(best_action)] = 1.0f;
+        return probs;
+    }
+    for (int a = 0; a < kActionDim; ++a) {
+        if (legal_mask[static_cast<std::size_t>(a)] == 0) {
+            probs[static_cast<std::size_t>(a)] = 0.0f;
+            continue;
+        }
+        const int n = std::max(0, pruned_counts[static_cast<std::size_t>(a)]);
+        probs[static_cast<std::size_t>(a)] = static_cast<float>(static_cast<double>(n) / total_pruned);
+    }
+    return probs;
+}
+
 NodeMetadata build_node_metadata(const GameState& state) {
     NodeMetadata out;
     out.mask = state_encoder::build_legal_mask(state);
@@ -313,7 +465,9 @@ NativeMCTSResult run_native_mcts(
     float root_dirichlet_epsilon,
     float root_dirichlet_alpha_total,
     int eval_batch_size,
-    std::uint64_t rng_seed
+    std::uint64_t rng_seed,
+    bool use_forced_playouts,
+    float forced_playouts_k
 ) {
     if (num_simulations <= 0) {
         throw std::invalid_argument("num_simulations must be positive");
@@ -326,6 +480,9 @@ NativeMCTSResult run_native_mcts(
     }
     if (eval_batch_size <= 0) {
         throw std::invalid_argument("eval_batch_size must be positive");
+    }
+    if (!(forced_playouts_k > 0.0f)) {
+        throw std::invalid_argument("forced_playouts_k must be positive");
     }
 
     const NodeMetadata root_data = build_node_metadata(root_state);
@@ -601,7 +758,9 @@ NativeMCTSResult run_native_mcts(
                         node_index,
                         node_data.mask,
                         c_puct,
-                        eps
+                        eps,
+                        use_forced_playouts,
+                        forced_playouts_k
                     );
                     if (action < 0) {
                         break;
@@ -697,10 +856,13 @@ NativeMCTSResult run_native_mcts(
 
                                 action = select_puct_action_with_pending_flags(
                                     node,
+                                    node_index,
                                     node_data.mask,
                                     c_puct,
                                     eps,
-                                    pending_flags.get()
+                                    pending_flags.get(),
+                                    use_forced_playouts,
+                                    forced_playouts_k
                                 );
                                 if (action < 0) {
                                     rollback_virtual_path(path);
@@ -792,48 +954,21 @@ NativeMCTSResult run_native_mcts(
 
     const MCTSNode& root = nodes[0];
     NativeMCTSResult result;
-
-    double total_visits = 0.0;
-    for (int a = 0; a < kActionDim; ++a) {
-        total_visits += static_cast<double>(root.visit_count[static_cast<std::size_t>(a)]);
-    }
-    if (total_visits > 0.0) {
-        for (int a = 0; a < kActionDim; ++a) {
-            result.visit_probs[static_cast<std::size_t>(a)] = static_cast<float>(
-                static_cast<double>(root.visit_count[static_cast<std::size_t>(a)]) / total_visits
-            );
-        }
-    } else {
-        int legal_count = 0;
-        for (int a = 0; a < kActionDim; ++a) {
-            if (root_data.mask[static_cast<std::size_t>(a)] != 0) {
-                ++legal_count;
-            }
-        }
-        const float u = 1.0f / static_cast<float>(legal_count);
-        for (int a = 0; a < kActionDim; ++a) {
-            result.visit_probs[static_cast<std::size_t>(a)] =
-                (root_data.mask[static_cast<std::size_t>(a)] != 0) ? u : 0.0f;
-        }
-    }
-    double prob_sum = 0.0;
-    for (int a = 0; a < kActionDim; ++a) {
-        if (root_data.mask[static_cast<std::size_t>(a)] == 0) {
-            result.visit_probs[static_cast<std::size_t>(a)] = 0.0f;
-        }
-        prob_sum += static_cast<double>(result.visit_probs[static_cast<std::size_t>(a)]);
-    }
-    if (prob_sum > 0.0 && std::isfinite(prob_sum)) {
-        for (int a = 0; a < kActionDim; ++a) {
-            result.visit_probs[static_cast<std::size_t>(a)] = static_cast<float>(
-                static_cast<double>(result.visit_probs[static_cast<std::size_t>(a)]) / prob_sum
-            );
-        }
-    }
-
+    const auto raw_visit_probs = visit_probs_from_counts(root, root_data.mask);
     result.chosen_action_idx = sample_action_from_visits(
-        result.visit_probs, root_data.mask, turns_taken, temperature_moves, temperature, rng
+        raw_visit_probs, root_data.mask, turns_taken, temperature_moves, temperature, rng
     );
+    if (use_forced_playouts) {
+        result.visit_probs = prune_policy_target_visit_probs(
+            root,
+            root_data.mask,
+            c_puct,
+            eps,
+            forced_playouts_k
+        );
+    } else {
+        result.visit_probs = raw_visit_probs;
+    }
 
     int best_visit_action = -1;
     int best_visit_count = -1;

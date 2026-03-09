@@ -629,6 +629,8 @@ def _collect_replay_parallel_mcts(
                 seed_base=int(seed_start),
                 workers=int(workers_used),
                 fast_search_sims=int(PARALLEL_SELFPLAY_FAST_SEARCH_SIMS),
+                use_forced_playouts=bool(mcts_config.use_forced_playouts),
+                forced_playouts_k=float(mcts_config.forced_playouts_k),
             )
         return run_selfplay_session_parallel(
             checkpoint_path=checkpoint_path,
@@ -638,6 +640,8 @@ def _collect_replay_parallel_mcts(
             seed_base=int(seed_start),
             workers=int(workers_used),
             fast_search_sims=int(PARALLEL_SELFPLAY_FAST_SEARCH_SIMS),
+            use_forced_playouts=bool(mcts_config.use_forced_playouts),
+            forced_playouts_k=float(mcts_config.forced_playouts_k),
         )
 
     if checkpoint_path_override is not None:
@@ -954,6 +958,8 @@ def run_smoke(
         root_dirichlet_noise=mcts_root_dirichlet_noise,
         root_dirichlet_epsilon=mcts_root_dirichlet_epsilon,
         root_dirichlet_alpha_total=mcts_root_dirichlet_alpha_total,
+        use_forced_playouts=True,
+        forced_playouts_k=2.0,
     )
 
     model = MaskedPolicyValueNet(hidden_dim=model_hidden_dim, res_blocks=model_res_blocks).to(device)
@@ -1262,6 +1268,8 @@ def run_cycles(
         root_dirichlet_noise=mcts_root_dirichlet_noise,
         root_dirichlet_epsilon=mcts_root_dirichlet_epsilon,
         root_dirichlet_alpha_total=mcts_root_dirichlet_alpha_total,
+        use_forced_playouts=True,
+        forced_playouts_k=2.0,
     )
     heuristic_eval_mcts_config = MCTSConfig(
         num_simulations=int(HEURISTIC_EVAL_MCTS_SIMS),
