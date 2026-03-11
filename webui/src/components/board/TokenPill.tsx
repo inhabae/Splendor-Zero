@@ -18,8 +18,8 @@ export function TokenPill({ color, count, showMcts = false, showModel = false }:
       <span className="token-pill-count">{count}</span>
       {(showMcts || showModel) && (
         <span className="token-marker-row" aria-label="Top move markers">
-          {showMcts && <span className="top-marker mcts" title="MCTS top move" />}
-          {showModel && <span className="top-marker model" title="Model top move" />}
+          {showMcts && <span className="top-marker mcts" title="MCTS top move">MC</span>}
+          {showModel && <span className="top-marker model" title="Model top move">NN</span>}
         </span>
       )}
     </div>

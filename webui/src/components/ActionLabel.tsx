@@ -54,14 +54,15 @@ function CardActionLabel({ verb, card }: { verb: 'BUY' | 'RESERVE'; card: CardDT
   if (!card) {
     return <span className="action-verb">{verb}</span>;
   }
+  const toneClass = `action-tone token-${card.bonus_color}`;
   return (
     <>
-      <span className="action-verb">{verb}</span>
-      <span className={`action-points token-${card.bonus_color}`}>
+      <span className={`action-verb action-verb-card ${toneClass}`}>{verb}</span>
+      <span className={`action-points ${toneClass}`}>
         +{card.points}
       </span>
       {costEntries(card).map(({ color, count }) => (
-        <span key={`${verb}-${color}-${count}`} className={`action-cost token-${color}`}>
+        <span key={`${verb}-${color}-${count}`} className={`action-cost ${toneClass}`}>
           <span className="action-cost-emoji">{COLOR_EMOJI[color]}</span>
           <span>{count}</span>
         </span>
@@ -83,6 +84,15 @@ function TakeLabel({ colors, duplicate = 1 }: { colors: readonly number[]; dupli
           </span>
         );
       })}
+    </>
+  );
+}
+
+function DeckReserveLabel({ tier }: { tier: 1 | 2 | 3 }) {
+  return (
+    <>
+      <span className={`action-verb action-verb-tier action-tier-${tier}`}>RESERVE</span>
+      <span className={`action-meta action-tier-${tier}`}>DECK T{tier}</span>
     </>
   );
 }
@@ -115,12 +125,7 @@ export function ActionLabel({
     const slot = rel % 4;
     content = <CardActionLabel verb="RESERVE" card={faceupCard(board, tier, slot)} />;
   } else if (27 <= actionIdx && actionIdx <= 29) {
-    content = (
-      <>
-        <span className="action-verb">RESERVE</span>
-        <span className="action-meta">DECK T{actionIdx - 26}</span>
-      </>
-    );
+    content = <DeckReserveLabel tier={(actionIdx - 26) as 1 | 2 | 3} />;
   } else if (30 <= actionIdx && actionIdx <= 39) {
     content = <TakeLabel colors={TAKE3_TRIPLETS[actionIdx - 30]} />;
   } else if (40 <= actionIdx && actionIdx <= 44) {

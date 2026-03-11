@@ -31,6 +31,10 @@ const TAKE2_PAIRS = [
   [3, 4],
 ] as const;
 
+function seatLabel(seat: 'P0' | 'P1'): 'P1' | 'P2' {
+  return seat === 'P0' ? 'P1' : 'P2';
+}
+
 function actionBankColors(action: ActionVizDTO | null | undefined): Set<string> {
   const out = new Set<string>();
   if (!action) {
@@ -71,10 +75,16 @@ export function GameBoard({
   board,
   mctsTopAction = null,
   modelTopAction = null,
+  onCardClick,
+  onNobleClick,
+  onReservedCardClick,
 }: {
   board: BoardStateDTO;
   mctsTopAction?: ActionVizDTO | null;
   modelTopAction?: ActionVizDTO | null;
+  onCardClick?: (tier: number, slot: number) => void;
+  onNobleClick?: (slot: number) => void;
+  onReservedCardClick?: (seat: 'P0' | 'P1', slot: number) => void;
 }) {
   const mctsBankColors = actionBankColors(mctsTopAction);
   const modelBankColors = actionBankColors(modelTopAction);
@@ -83,16 +93,24 @@ export function GameBoard({
       <header className="board-meta">
         <div>Target: {board.meta.target_points}</div>
         <div>Turn: {board.meta.turn_index}</div>
-        <div>To Move: {board.meta.player_to_move}</div>
+        <div>To Move: {seatLabel(board.meta.player_to_move)}</div>
       </header>
       <section className="board-main">
         <aside className="board-left">
-          <PlayerStrip player={board.players[0]} seat="P0" mctsTopAction={mctsTopAction} modelTopAction={modelTopAction} />
-          <PlayerStrip player={board.players[1]} seat="P1" mctsTopAction={mctsTopAction} modelTopAction={modelTopAction} />
+          <PlayerStrip player={board.players[0]} seat="P0" mctsTopAction={mctsTopAction} modelTopAction={modelTopAction} onReservedCardClick={onReservedCardClick} />
+          <PlayerStrip player={board.players[1]} seat="P1" mctsTopAction={mctsTopAction} modelTopAction={modelTopAction} onReservedCardClick={onReservedCardClick} />
         </aside>
 
-        <section className="board-center">
-          <div className="bank-row">
+        <section className="board-right">
+          <div className="nobles-row">
+            <div className="nobles-grid">
+              {board.nobles.length === 0 && <div className="empty-note">No nobles available</div>}
+              {board.nobles.map((noble, idx) => (
+                <NobleView key={`noble-${idx}`} noble={noble} onClick={noble.slot != null ? () => onNobleClick?.(noble.slot as number) : undefined} />
+              ))}
+            </div>
+          </div>
+          <div className="bank-row bank-row-inline">
             {TOKEN_ORDER.filter((c) => c !== 'gold').map((color) => (
               <TokenPill
                 key={`bank-${color}`}
@@ -104,28 +122,9 @@ export function GameBoard({
             ))}
             <TokenPill key="bank-gold" color="gold" count={board.bank.gold} />
           </div>
-          <div className="deck-stack-col">
-            {board.tiers.map((tier) => (
-              <div key={`deck-${tier.tier}`} className="deck-badge">
-                <span>Deck</span>
-                <b>{tier.deck_count < 0 ? '?' : tier.deck_count}</b>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="board-right">
-          <div className="nobles-row">
-            <div className="nobles-grid">
-              {board.nobles.length === 0 && <div className="empty-note">No nobles available</div>}
-              {board.nobles.map((noble, idx) => (
-                <NobleView key={`noble-${idx}`} noble={noble} />
-              ))}
-            </div>
-          </div>
           <div className="tiers-wrap">
             {board.tiers.map((tier) => (
-              <TierRow key={`tier-row-${tier.tier}`} tier={tier} mctsTopAction={mctsTopAction} modelTopAction={modelTopAction} />
+              <TierRow key={`tier-row-${tier.tier}`} tier={tier} mctsTopAction={mctsTopAction} modelTopAction={modelTopAction} onCardClick={onCardClick} />
             ))}
           </div>
         </section>

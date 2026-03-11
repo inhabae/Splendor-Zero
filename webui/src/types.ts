@@ -27,6 +27,8 @@ export interface GameConfigDTO {
   num_simulations: number;
   player_seat: Seat;
   seed: number;
+  manual_reveal_mode: boolean;
+  analysis_mode: boolean;
 }
 
 export interface ColorCountsDTO {
@@ -48,9 +50,18 @@ export interface CardDTO {
   source: 'faceup' | 'reserved_public' | 'reserved_private';
   tier?: number;
   slot?: number;
+  is_placeholder?: boolean;
 }
 
 export interface NobleDTO {
+  points: number;
+  requirements: ColorCountsDTO;
+  slot?: number;
+  is_placeholder?: boolean;
+}
+
+export interface CatalogNobleDTO {
+  id: number;
   points: number;
   requirements: ColorCountsDTO;
 }
@@ -95,11 +106,21 @@ export interface GameSnapshotDTO {
   move_log: MoveLogEntryDTO[];
   config?: GameConfigDTO;
   board_state?: BoardStateDTO | null;
+  pending_reveals: PendingRevealDTO[];
+  hidden_deck_card_ids_by_tier: Record<number, number[]>;
+  hidden_faceup_reveal_candidates: Record<string, number[]>;
+  hidden_reserved_reveal_candidates: Record<string, number[]>;
+  can_undo: boolean;
+  can_redo: boolean;
 }
 
 export interface EngineThinkResponse {
   job_id: string;
   status: 'QUEUED' | 'RUNNING';
+}
+
+export interface EngineThinkRequest {
+  num_simulations?: number;
 }
 
 export interface EngineJobStatusDTO {
@@ -108,10 +129,18 @@ export interface EngineJobStatusDTO {
   error?: string | null;
   result?: {
     action_idx: number;
+    action_details: ActionVizDTO[];
+    model_action_details?: ActionVizDTO[] | null;
+    root_value?: number | null;
   } | null;
 }
 
 export interface PlayerMoveResponse {
+  snapshot: GameSnapshotDTO;
+  engine_should_move: boolean;
+}
+
+export interface RevealCardResponse {
   snapshot: GameSnapshotDTO;
   engine_should_move: boolean;
 }
@@ -185,4 +214,21 @@ export interface ReplayStepDTO {
   board_state: BoardStateDTO;
   action_details: ActionVizDTO[];
   model_action_details?: ActionVizDTO[] | null;
+}
+
+export interface PendingRevealDTO {
+  zone: 'faceup_card' | 'reserved_card' | 'noble';
+  tier: number;
+  slot: number;
+  reason: 'initial_setup' | 'replacement_after_buy' | 'replacement_after_reserve' | 'reserved_from_deck' | 'initial_noble_setup';
+  actor?: Seat | null;
+  action_idx?: number | null;
+}
+
+export interface CatalogCardDTO {
+  id: number;
+  tier: number;
+  points: number;
+  bonus_color: 'white' | 'blue' | 'green' | 'red' | 'black';
+  cost: ColorCountsDTO;
 }
