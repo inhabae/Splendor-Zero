@@ -193,7 +193,37 @@ class SplendorNativeEnv:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
+
+def list_standard_cards() -> list[dict[str, Any]]:
+    native = _try_load_native_module()
+    if native is None:
+        raise ImportError(
+            "splendor_native module not available. Build it (e.g. `cmake --build build --target splendor_native`)."
+        )
+    fn = getattr(native, "list_standard_cards", None)
+    if fn is None:
+        raise RuntimeError(
+            "splendor_native is missing list_standard_cards(). Rebuild the extension so web catalog APIs are available."
+        )
+    return [dict(item) for item in fn()]
+
+
+def list_standard_nobles() -> list[dict[str, Any]]:
+    native = _try_load_native_module()
+    if native is None:
+        raise ImportError(
+            "splendor_native module not available. Build it (e.g. `cmake --build build --target splendor_native`)."
+        )
+    fn = getattr(native, "list_standard_nobles", None)
+    if fn is None:
+        raise RuntimeError(
+            "splendor_native is missing list_standard_nobles(). Rebuild the extension so web catalog APIs are available."
+        )
+    return [dict(item) for item in fn()]
+
 __all__ = [
     "StepState",
     "SplendorNativeEnv",
+    "list_standard_cards",
+    "list_standard_nobles",
 ]

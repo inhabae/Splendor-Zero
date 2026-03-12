@@ -29,6 +29,54 @@ namespace py = pybind11;
 
 namespace {
 
+const char* color_name(Color color) {
+    switch (color) {
+        case Color::White: return "white";
+        case Color::Blue: return "blue";
+        case Color::Green: return "green";
+        case Color::Red: return "red";
+        case Color::Black: return "black";
+        case Color::Joker: return "joker";
+    }
+    throw std::out_of_range("Invalid card color");
+}
+
+py::dict tokens_dict(const Tokens& tokens) {
+    py::dict out;
+    out["white"] = tokens.white;
+    out["blue"] = tokens.blue;
+    out["green"] = tokens.green;
+    out["red"] = tokens.red;
+    out["black"] = tokens.black;
+    return out;
+}
+
+py::list list_standard_cards_py() {
+    py::list out;
+    for (const Card& card : standardCards()) {
+        py::dict item;
+        item["id"] = card.id;
+        item["tier"] = card.level;
+        item["points"] = card.points;
+        item["bonus_color"] = color_name(card.color);
+        item["cost"] = tokens_dict(card.cost);
+        out.append(std::move(item));
+    }
+    return out;
+}
+
+py::list list_standard_nobles_py() {
+    py::list out;
+    for (const Noble& noble : standardNobles()) {
+        py::dict item;
+        item["id"] = noble.id;
+        item["points"] = noble.points;
+        item["requirements"] = tokens_dict(noble.requirements);
+        out.append(std::move(item));
+    }
+    return out;
+}
+
 constexpr int kActionDim = state_encoder::ACTION_DIM;
 constexpr int kStateDim = state_encoder::STATE_DIM;
 constexpr int kCardFeatureLen = 11;
@@ -441,6 +489,8 @@ PYBIND11_MODULE(splendor_native, m) {
     m.attr("STATE_DIM") = py::int_(kStateDim);
     m.attr("BUILD_TYPE") = py::str(SPLENDOR_BUILD_TYPE);
     m.attr("BUILD_OPTIMIZED") = py::bool_(SPLENDOR_BUILD_OPTIMIZED != 0);
+    m.def("list_standard_cards", &list_standard_cards_py);
+    m.def("list_standard_nobles", &list_standard_nobles_py);
 
     py::class_<StepResult>(m, "StepResult")
         .def_property_readonly("state", &StepResult::state_array)

@@ -9,11 +9,7 @@ import {
   GameSnapshotDTO,
   PlayerMoveResponse,
   RevealCardResponse,
-  ReplayStepDTO,
   Seat,
-  SelfPlayRunResponse,
-  SelfPlaySessionDTO,
-  SelfPlaySessionSummaryDTO,
 } from './types';
 import { GameBoard } from './components/board/GameBoard';
 import { ActionLabel } from './components/ActionLabel';
@@ -47,12 +43,6 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-function winnerLabel(winner: number): string {
-  if (winner === -2) return 'In progress';
-  if (winner === -1) return 'Draw';
-  return winner === 0 ? 'Winner: P1' : 'Winner: P2';
-}
-
 function isBlockingPendingReveal(reveal: GameSnapshotDTO['pending_reveals'][number]): boolean {
   return reveal.zone !== 'reserved_card';
 }
@@ -81,6 +71,7 @@ export function App() {
   const [numSimulations] = useState(400);
   const [searchSimulations, setSearchSimulations] = useState(400);
   const [playerSeat] = useState<Seat>('P0');
+  const [setupEngineSeat, setSetupEngineSeat] = useState<Seat>('P0');
   const [seed] = useState('');
   const [homeView, setHomeView] = useState<HomeView>('HOME');
   const [revealSelections, setRevealSelections] = useState<Record<string, string>>({});
@@ -91,22 +82,10 @@ export function App() {
   const [jobStatus, setJobStatus] = useState<EngineJobStatusDTO | null>(null);
   const [uiStatus, setUiStatus] = useState<UiStatus>('IDLE');
 
-  const [selfplaySims, setSelfplaySims] = useState(400);
-  const [selfplayGames, setSelfplayGames] = useState(1);
-  const [selfplayMaxTurns, setSelfplayMaxTurns] = useState(100);
-  const [selfplaySeed, setSelfplaySeed] = useState('');
-  const [selfplaySessions, setSelfplaySessions] = useState<SelfPlaySessionDTO[]>([]);
-  const [selectedSessionId, setSelectedSessionId] = useState('');
-  const [selectedEpisodeIdx, setSelectedEpisodeIdx] = useState(0);
-  const [selectedStepIdx, setSelectedStepIdx] = useState(0);
-  const [sessionSummary, setSessionSummary] = useState<SelfPlaySessionSummaryDTO | null>(null);
-  const [replayStep, setReplayStep] = useState<ReplayStepDTO | null>(null);
-  const [selfplayRunInfo, setSelfplayRunInfo] = useState<SelfPlayRunResponse | null>(null);
-
   const [error, setError] = useState<string | null>(null);
-  const [selfplayLoading, setSelfplayLoading] = useState(false);
 
   const pollRef = useRef<number | null>(null);
+  const isSetupLikeView = homeView === 'SETUP' || homeView === 'DEV';
 
   const selectedCheckpoint = useMemo(
     () => checkpoints.find((item) => item.id === checkpointId) ?? null,
@@ -144,23 +123,6 @@ export function App() {
     return grouped;
   }, [catalogCards]);
 
-  const availableEpisodes = useMemo(() => {
-    if (!sessionSummary) {
-      return [] as number[];
-    }
-    return Object.keys(sessionSummary.steps_per_episode)
-      .map((v) => Number(v))
-      .sort((a, b) => a - b);
-  }, [sessionSummary]);
-
-  const maxStepForEpisode = useMemo(() => {
-    if (!sessionSummary) {
-      return 0;
-    }
-    const count = Number(sessionSummary.steps_per_episode[String(selectedEpisodeIdx)] ?? 0);
-    return Math.max(0, count - 1);
-  }, [sessionSummary, selectedEpisodeIdx]);
-
   useEffect(() => {
     void (async () => {
       try {
@@ -172,11 +134,6 @@ export function App() {
         setCatalogNobles(nobles);
         if (!checkpointId && list.length > 0) {
           setCheckpointId(list[0].id);
-        }
-        const sessions = await fetchJSON<SelfPlaySessionDTO[]>('/api/selfplay/sessions');
-        setSelfplaySessions(sessions);
-        if (sessions.length > 0) {
-          setSelectedSessionId((prev) => (prev ? prev : sessions[0].session_id));
         }
       } catch (err) {
         setError((err as Error).message);
@@ -251,6 +208,10 @@ export function App() {
       : 'WAITING_ENGINE';
   }
 
+  function oppositeSeat(seat: Seat): Seat {
+    return seat === 'P0' ? 'P1' : 'P0';
+  }
+
   function shouldAutoSearch(nextSnapshot: GameSnapshotDTO): boolean {
     return (
       nextSnapshot.status === 'IN_PROGRESS' &&
@@ -312,88 +273,6 @@ export function App() {
     return match?.id ?? null;
   }
 
-  async function refreshSelfplaySessions(): Promise<void> {
-    const sessions = await fetchJSON<SelfPlaySessionDTO[]>('/api/selfplay/sessions');
-    setSelfplaySessions(sessions);
-    if (sessions.length > 0) {
-      setSelectedSessionId((prev) => (prev && sessions.some((s) => s.session_id === prev) ? prev : sessions[0].session_id));
-    }
-  }
-
-  async function loadSessionSummary(sessionId: string): Promise<void> {
-    const summary = await fetchJSON<SelfPlaySessionSummaryDTO>(`/api/selfplay/session/${sessionId}/summary`);
-    setSessionSummary(summary);
-  }
-
-  async function loadReplayStep(sessionId: string, episodeIdx: number, stepIdx: number): Promise<void> {
-    const step = await fetchJSON<ReplayStepDTO>(
-      `/api/selfplay/session/${sessionId}/step?episode_idx=${episodeIdx}&step_idx=${stepIdx}`,
-    );
-    setReplayStep(step);
-    setSelectedEpisodeIdx(episodeIdx);
-    setSelectedStepIdx(stepIdx);
-  }
-
-  async function onRunSelfplay(event: FormEvent): Promise<void> {
-    event.preventDefault();
-    setError(null);
-    setSelfplayLoading(true);
-    setSelfplayRunInfo(null);
-    try {
-      if (!checkpointId) {
-        throw new Error('Please choose a checkpoint for self-play');
-      }
-      const result = await fetchJSON<SelfPlayRunResponse>('/api/selfplay/run', {
-        method: 'POST',
-        body: JSON.stringify({
-          checkpoint_id: checkpointId,
-          num_simulations: Number(selfplaySims),
-          games: Number(selfplayGames),
-          max_turns: Number(selfplayMaxTurns),
-          ...(selfplaySeed.trim().length > 0 ? { seed: Number(selfplaySeed) } : {}),
-        }),
-      });
-      setSelfplayRunInfo(result);
-      await refreshSelfplaySessions();
-      setSelectedSessionId(result.session_id);
-      await loadSessionSummary(result.session_id);
-      await loadReplayStep(result.session_id, 0, 0);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setSelfplayLoading(false);
-    }
-  }
-
-  async function onLoadSession(event: FormEvent): Promise<void> {
-    event.preventDefault();
-    if (!selectedSessionId) {
-      return;
-    }
-    setError(null);
-    setSelfplayLoading(true);
-    try {
-      await loadSessionSummary(selectedSessionId);
-      await loadReplayStep(selectedSessionId, selectedEpisodeIdx, selectedStepIdx);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setSelfplayLoading(false);
-    }
-  }
-
-  async function onJumpStep(episodeIdx: number, stepIdx: number): Promise<void> {
-    if (!selectedSessionId) {
-      return;
-    }
-    setError(null);
-    try {
-      await loadReplayStep(selectedSessionId, episodeIdx, stepIdx);
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  }
-
   async function startEngineThink(customNumSimulations?: number): Promise<void> {
     setError(null);
     const think = await fetchJSON<EngineThinkResponse>('/api/game/engine-think', {
@@ -441,7 +320,7 @@ export function App() {
     }
   }
 
-  async function startGame(manualRevealMode: boolean): Promise<void> {
+  async function startGame(manualRevealMode: boolean, playerSeatOverride?: Seat, analysisModeOverride?: boolean): Promise<void> {
     setError(null);
     clearPolling();
     setJobStatus(null);
@@ -452,9 +331,9 @@ export function App() {
       const payload = {
         checkpoint_id: checkpointId,
         num_simulations: Number(numSimulations),
-        player_seat: playerSeat,
+        player_seat: playerSeatOverride ?? playerSeat,
         manual_reveal_mode: manualRevealMode,
-        analysis_mode: true,
+        analysis_mode: analysisModeOverride ?? true,
         ...(seed.trim().length > 0 ? { seed: Number(seed) } : {}),
       };
 
@@ -470,26 +349,26 @@ export function App() {
   async function onStartGame(event: FormEvent): Promise<void> {
     event.preventDefault();
     try {
-      await startGame(false);
+      await startGame(false, playerSeat, false);
       setHomeView('QUICK');
     } catch (err) {
       setError((err as Error).message);
     }
   }
 
-  function onOpenSetup(): void {
+  function onOpenManualView(view: 'SETUP' | 'DEV'): void {
     setError(null);
     clearPolling();
     setJobStatus(null);
     setSnapshot(null);
-    setHomeView('SETUP');
+    setHomeView(view);
   }
 
-  async function onStartSetup(event: FormEvent): Promise<void> {
+  async function onStartManualGame(event: FormEvent, view: 'SETUP' | 'DEV'): Promise<void> {
     event.preventDefault();
     try {
-      await startGame(true);
-      setHomeView('SETUP');
+      await startGame(true, oppositeSeat(setupEngineSeat), false);
+      setHomeView(view);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -656,7 +535,7 @@ export function App() {
     const key = revealKey(zone, tier, slot, seat);
     const hasPending = snapshot?.pending_reveals.some((reveal) => revealKey(reveal.zone, reveal.tier, reveal.slot, reveal.actor ?? undefined) === key) ?? false;
     const setupEditable =
-      homeView === 'SETUP' &&
+      isSetupLikeView &&
       snapshot?.pending_reveals.some((reveal) => reveal.reason === 'initial_setup' || reveal.reason === 'initial_noble_setup') &&
       (zone === 'faceup_card' || zone === 'noble');
     const boardCardEditable = zone === 'faceup_card' && snapshot?.config?.manual_reveal_mode;
@@ -704,7 +583,7 @@ export function App() {
     const parsed = parseRevealKey(activeRevealKey);
     if (
       parsed &&
-      homeView === 'SETUP' &&
+      isSetupLikeView &&
       snapshot.pending_reveals.some((reveal) => reveal.reason === 'initial_setup' || reveal.reason === 'initial_noble_setup')
     ) {
       return {
@@ -727,7 +606,7 @@ export function App() {
       };
     }
     return null;
-  }, [snapshot, activeRevealKey, homeView]);
+  }, [snapshot, activeRevealKey, isSetupLikeView]);
   const liveMctsTopAction = useMemo(() => {
     const details = jobStatus?.result?.action_details;
     if (!details?.length) return null;
@@ -750,7 +629,18 @@ export function App() {
   }, [jobStatus]);
   const liveRows = useMemo(() => {
     const mcts = jobStatus?.result?.action_details;
-    if (!mcts?.length) return [];
+    if (!mcts?.length) {
+      return (snapshot?.legal_action_details ?? []).map((action) => ({
+        action: {
+          ...action,
+          masked: false,
+          policy_prob: 0,
+          is_selected: false,
+          placement_hint: { zone: 'other' as const },
+        },
+        modelProb: 0,
+      }));
+    }
     const model = jobStatus?.result?.model_action_details;
     return mcts
       .map((action, idx) => ({ action, modelProb: model?.[idx]?.policy_prob ?? 0 }))
@@ -759,7 +649,7 @@ export function App() {
         if (b.action.policy_prob !== a.action.policy_prob) return b.action.policy_prob - a.action.policy_prob;
         return b.modelProb - a.modelProb;
       });
-  }, [jobStatus]);
+  }, [jobStatus, snapshot]);
   const displayBoard = useMemo(() => {
     if (!snapshot?.board_state) {
       return null;
@@ -829,7 +719,7 @@ export function App() {
     return displayBoard.nobles ?? [];
   }, [activeReveal, displayBoard]);
   const setupUnavailableCardIds = useMemo(() => {
-    if (!activeReveal || activeReveal.zone !== 'faceup_card' || homeView !== 'SETUP' || activeReveal.reason !== 'initial_setup' || !displayBoard) {
+    if (!activeReveal || activeReveal.zone !== 'faceup_card' || !isSetupLikeView || activeReveal.reason !== 'initial_setup' || !displayBoard) {
       return new Set<number>();
     }
     const ids = new Set<number>();
@@ -844,9 +734,9 @@ export function App() {
       }
     }
     return ids;
-  }, [activeReveal, homeView, displayBoard, catalogCards]);
+  }, [activeReveal, isSetupLikeView, displayBoard, catalogCards]);
   const setupUnavailableNobleIds = useMemo(() => {
-    if (!activeReveal || activeReveal.zone !== 'noble' || homeView !== 'SETUP' || activeReveal.reason !== 'initial_noble_setup' || !displayBoard) {
+    if (!activeReveal || activeReveal.zone !== 'noble' || !isSetupLikeView || activeReveal.reason !== 'initial_noble_setup' || !displayBoard) {
       return new Set<number>();
     }
     const ids = new Set<number>();
@@ -860,7 +750,7 @@ export function App() {
       }
     }
     return ids;
-  }, [activeReveal, homeView, displayBoard, catalogNobles]);
+  }, [activeReveal, isSetupLikeView, displayBoard, catalogNobles]);
   const liveAvailableCardIds = useMemo(() => {
     if (!activeReveal || !snapshot) {
       return new Set<number>();
@@ -895,69 +785,6 @@ export function App() {
     }
     return new Set<number>();
   }, [activeReveal, snapshot, displayBoard, catalogCards]);
-  const replayModelBestActionIdx = useMemo(() => {
-    if (!replayStep?.model_action_details) {
-      return null;
-    }
-    let bestIdx: number | null = null;
-    let bestProb = -1;
-    for (const action of replayStep.model_action_details) {
-      if (action.masked) {
-        continue;
-      }
-      if (action.policy_prob > bestProb) {
-        bestProb = action.policy_prob;
-        bestIdx = action.action_idx;
-      }
-    }
-    return bestIdx;
-  }, [replayStep]);
-  const replayMctsBestActionIdx = useMemo(() => {
-    if (!replayStep?.action_details) {
-      return null;
-    }
-    let bestIdx: number | null = null;
-    let bestProb = -1;
-    for (const action of replayStep.action_details) {
-      if (action.masked) {
-        continue;
-      }
-      if (action.policy_prob > bestProb) {
-        bestProb = action.policy_prob;
-        bestIdx = action.action_idx;
-      }
-    }
-    return bestIdx;
-  }, [replayStep]);
-  const replayMctsTopAction = useMemo(() => {
-    if (!replayStep || replayMctsBestActionIdx == null) {
-      return null;
-    }
-    return replayStep.action_details.find((a) => a.action_idx === replayMctsBestActionIdx) ?? null;
-  }, [replayStep, replayMctsBestActionIdx]);
-  const replayModelTopAction = useMemo(() => {
-    if (!replayStep || replayModelBestActionIdx == null) {
-      return null;
-    }
-    return replayStep.action_details.find((a) => a.action_idx === replayModelBestActionIdx) ?? null;
-  }, [replayStep, replayModelBestActionIdx]);
-  const replayRows = useMemo(() => {
-    if (!replayStep) {
-      return [];
-    }
-    return replayStep.action_details
-      .map((action, idx) => ({
-        action,
-        modelProb: replayStep.model_action_details?.[idx]?.policy_prob ?? 0,
-      }))
-      .filter((row) => !row.action.masked)
-      .sort((a, b) => {
-        if (b.modelProb !== a.modelProb) {
-          return b.modelProb - a.modelProb;
-        }
-        return b.action.policy_prob - a.action.policy_prob;
-      });
-  }, [replayStep]);
   const liveActionsPageCount = useMemo(
     () => Math.max(1, Math.ceil(liveRows.length / ACTIONS_PAGE_SIZE)),
     [liveRows.length],
@@ -994,13 +821,13 @@ export function App() {
               <strong>Quick Game</strong>
               <span>Standard engine vs human game with random setup.</span>
             </button>
-            <button type="button" className="home-mode-card" onClick={() => onOpenSetup()}>
+            <button type="button" className="home-mode-card" onClick={() => onOpenManualView('SETUP')}>
               <strong>Set Up</strong>
               <span>Start from placeholders and fill the opening board manually.</span>
             </button>
-            <button type="button" className="home-mode-card" onClick={() => setHomeView('DEV')}>
+            <button type="button" className="home-mode-card" onClick={() => onOpenManualView('DEV')}>
               <strong>Dev</strong>
-              <span>Replay and self-play tools.</span>
+              <span>Uses the same manual board-building flow as Set Up for now.</span>
             </button>
           </div>
         </section>
@@ -1033,11 +860,11 @@ export function App() {
         </section>
       )}
 
-      {homeView === 'SETUP' && !snapshot && (
+      {isSetupLikeView && !snapshot && (
         <section className="panel">
-          <h2>Set Up</h2>
+          <h2>{homeView === 'DEV' ? 'Dev' : 'Set Up'}</h2>
           <p>Choose a checkpoint, then fill the opening cards and nobles manually.</p>
-          <form onSubmit={(event) => void onStartSetup(event)} className="grid-form">
+          <form onSubmit={(event) => void onStartManualGame(event, homeView === 'DEV' ? 'DEV' : 'SETUP')} className="grid-form">
             <label>
               Checkpoint
               <select value={checkpointId} onChange={(event) => setCheckpointId(event.target.value)} disabled={checkpoints.length === 0}>
@@ -1048,14 +875,21 @@ export function App() {
               ))}
               </select>
             </label>
+            <label>
+              Engine Player
+              <select value={setupEngineSeat} onChange={(event) => setSetupEngineSeat(event.target.value as Seat)}>
+                <option value="P0">P1</option>
+                <option value="P1">P2</option>
+              </select>
+            </label>
             <button type="submit" disabled={!canStart}>
-              Start Setup
+              {homeView === 'DEV' ? 'Start Dev' : 'Start Setup'}
             </button>
           </form>
         </section>
       )}
 
-      {(homeView === 'QUICK' || homeView === 'SETUP') && snapshot && (
+      {(homeView === 'QUICK' || isSetupLikeView) && snapshot && (
         <section className="panel game-layout">
           <div className="board-column">
             <h2>Game Board</h2>
@@ -1086,7 +920,7 @@ export function App() {
               {uiStatus === 'WAITING_ENGINE' && <p className="spinner">Engine analyzing...</p>}
               {uiStatus === 'WAITING_REVEAL' && <p>Waiting for board update before the next move.</p>}
               {jobStatus?.error && <p className="error">Engine error: {jobStatus.error}</p>}
-              {uiStatus !== 'WAITING_ENGINE' && snapshot.status === 'IN_PROGRESS' && (
+              {uiStatus !== 'WAITING_ENGINE' && snapshot.status === 'IN_PROGRESS' && (snapshot.config?.analysis_mode || snapshot.player_to_move !== snapshot.config?.player_seat) && (
                 <div className="analysis-search-row">
                   <input
                     type="number"
@@ -1180,177 +1014,6 @@ export function App() {
         </section>
       )}
 
-      {homeView === 'DEV' && (
-      <section className="panel">
-        <h2>Self-Play Replay</h2>
-        <form onSubmit={(event) => void onRunSelfplay(event)} className="grid-form">
-          <label>
-            Checkpoint
-            <select value={checkpointId} onChange={(event) => setCheckpointId(event.target.value)}>
-              {checkpoints.map((item) => (
-                <option key={`sp-${item.id}`} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Sims
-            <input type="number" min={1} max={10000} value={selfplaySims} onChange={(e) => setSelfplaySims(Number(e.target.value))} />
-          </label>
-          <label>
-            Games
-            <input type="number" min={1} max={500} value={selfplayGames} onChange={(e) => setSelfplayGames(Number(e.target.value))} />
-          </label>
-          <label>
-            Max turns
-            <input type="number" min={1} max={400} value={selfplayMaxTurns} onChange={(e) => setSelfplayMaxTurns(Number(e.target.value))} />
-          </label>
-          <label>
-            Seed (optional)
-            <input value={selfplaySeed} onChange={(event) => setSelfplaySeed(event.target.value)} placeholder="Random if blank" />
-          </label>
-          <button type="submit" disabled={selfplayLoading || !checkpointId}>Run Self-Play</button>
-        </form>
-
-        {selfplayRunInfo && (
-          <p>
-            Latest run: session <strong>{selfplayRunInfo.session_id}</strong> | games={selfplayRunInfo.games} | steps={selfplayRunInfo.steps}
-          </p>
-        )}
-
-        <form onSubmit={(event) => void onLoadSession(event)} className="grid-form">
-          <label>
-            Session
-            <select value={selectedSessionId} onChange={(event) => setSelectedSessionId(event.target.value)}>
-              {selfplaySessions.length === 0 && <option value="">No sessions</option>}
-              {selfplaySessions.map((session) => (
-                <option key={session.session_id} value={session.session_id}>
-                  {session.display_name} ({session.steps} steps)
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Episode
-            <input
-              type="number"
-              min={0}
-              max={availableEpisodes.length > 0 ? Math.max(...availableEpisodes) : 0}
-              value={selectedEpisodeIdx}
-              onChange={(event) => setSelectedEpisodeIdx(Number(event.target.value))}
-            />
-          </label>
-          <label>
-            Step
-            <input
-              type="number"
-              min={0}
-              max={maxStepForEpisode}
-              value={selectedStepIdx}
-              onChange={(event) => setSelectedStepIdx(Number(event.target.value))}
-            />
-          </label>
-          <button type="submit" disabled={!selectedSessionId || selfplayLoading}>Load Step</button>
-          <button
-            type="button"
-            disabled={!selectedSessionId || selfplayLoading || selectedStepIdx <= 0}
-            onClick={() => void onJumpStep(selectedEpisodeIdx, Math.max(0, selectedStepIdx - 1))}
-          >
-            Prev Step
-          </button>
-          <button
-            type="button"
-            disabled={!selectedSessionId || selfplayLoading || selectedStepIdx >= maxStepForEpisode}
-            onClick={() => void onJumpStep(selectedEpisodeIdx, Math.min(maxStepForEpisode, selectedStepIdx + 1))}
-          >
-            Next Step
-          </button>
-          <button type="button" disabled={selfplayLoading} onClick={() => void refreshSelfplaySessions()}>
-            Refresh Sessions
-          </button>
-        </form>
-
-        {sessionSummary && (
-          <p>
-            Session summary: games={sessionSummary.games}, total steps={sessionSummary.steps}, created={sessionSummary.created_at}
-          </p>
-        )}
-      </section>
-      )}
-
-      {homeView === 'DEV' && replayStep && (
-        <section className="panel game-layout">
-          <div className="board-column">
-            <h2>Replay Board</h2>
-            <GameBoard board={replayStep.board_state} mctsTopAction={replayMctsTopAction} modelTopAction={replayModelTopAction} />
-          </div>
-          <aside className="side-column">
-            <h2>Replay Inspector</h2>
-            <p>
-              Session: <strong>{replayStep.session_id}</strong> | Episode: <strong>{replayStep.episode_idx}</strong> | Step: <strong>{replayStep.step_idx}</strong>
-            </p>
-            <p>
-              Value target: <strong>{replayStep.value_target.toFixed(3)}</strong> | Model value:{' '}
-              <strong>{replayStep.model_value == null ? 'N/A' : replayStep.model_value.toFixed(3)}</strong>
-            </p>
-            <p>
-              Winner: <strong>{winnerLabel(replayStep.winner)}</strong> | Cutoff: <strong>{String(replayStep.reached_cutoff)}</strong>
-            </p>
-            <div className="actions-table-wrap">
-              <h3>Legal Actions</h3>
-              <table className="actions-table">
-                <thead>
-                  <tr>
-                    <th>Idx</th>
-                    <th>Action</th>
-                    <th>MCTS</th>
-                    <th>Model</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {replayRows.map(({ action, modelProb }) => {
-                    const isModelBest = replayModelBestActionIdx != null && replayModelBestActionIdx === action.action_idx;
-                    const isMctsBest = replayMctsBestActionIdx != null && replayMctsBestActionIdx === action.action_idx;
-                    return (
-                    <tr
-                      key={`viz-${action.action_idx}`}
-                      className={`action-row ${action.is_selected ? 'selected' : ''} ${isMctsBest ? 'mcts-best' : ''} ${isModelBest ? 'model-best' : ''}`}
-                    >
-                      <td className="action-idx-cell">{action.action_idx}</td>
-                      <td>
-                        <ActionLabel
-                          actionIdx={action.action_idx}
-                          board={replayStep.board_state}
-                          showPlayed={action.is_selected}
-                        />
-                      </td>
-                      <td>
-                        <div className="policy-cell">
-                          <span className="policy-value">{(action.policy_prob * 100).toFixed(2)}%</span>
-                          <div className="policy-bar">
-                            <span style={{ width: `${Math.max(0, Math.min(100, action.policy_prob * 100))}%` }} />
-                          </div>
-                        </div>
-                      </td>
-                      <td>
-                        <div className="policy-cell">
-                          <span className="policy-value">{(modelProb * 100).toFixed(2)}%</span>
-                          <div className="policy-bar">
-                            <span style={{ width: `${Math.max(0, Math.min(100, modelProb * 100))}%` }} />
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </aside>
-        </section>
-      )}
-
       {activeReveal && (
         <section className="reveal-modal-backdrop" onClick={() => setActiveRevealKey(null)}>
           <div className="reveal-modal" onClick={(event) => event.stopPropagation()}>
@@ -1369,7 +1032,7 @@ export function App() {
             )}
             {activeReveal.zone === 'noble' ? (
               <>
-                {homeView === 'SETUP' && activeReveal.reason === 'initial_noble_setup' && (
+                {isSetupLikeView && activeReveal.reason === 'initial_noble_setup' && (
                   <div className="setup-tier-slot-row noble-slot-row">
                     {activeBoardNobles.map((noble) => (
                       <div
@@ -1403,7 +1066,7 @@ export function App() {
               </>
             ) : (
               <>
-                {homeView === 'SETUP' && activeReveal.zone === 'faceup_card' && activeReveal.reason === 'initial_setup' && (
+                {isSetupLikeView && activeReveal.zone === 'faceup_card' && activeReveal.reason === 'initial_setup' && (
                   <div className="setup-tier-slot-row">
                     {activeTierBoardCards.map((card) => (
                       <div
@@ -1421,7 +1084,7 @@ export function App() {
                     <div key={`tier-catalog-row-${activeReveal.tier}-${color}`} className="tier-catalog-row">
                       <div className="tier-catalog-cards">
                         {cardsByTierAndColor[activeReveal.tier][color].map((card) => {
-                          const isSetup = homeView === 'SETUP' && activeReveal.zone === 'faceup_card' && activeReveal.reason === 'initial_setup';
+                          const isSetup = isSetupLikeView && activeReveal.zone === 'faceup_card' && activeReveal.reason === 'initial_setup';
                           const isAvailable = isSetup ? !setupUnavailableCardIds.has(card.id) : liveAvailableCardIds.has(card.id);
                           return (
                             <div
