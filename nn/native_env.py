@@ -184,6 +184,46 @@ class SplendorNativeEnv:
             raise RuntimeError("Game not initialized; call reset() first")
         return self._env.run_mcts(evaluator, **kwargs)
 
+    def hidden_deck_card_ids_by_tier(self) -> dict[int, list[int]]:
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return {int(k): [int(v) for v in values] for k, values in dict(self._env.hidden_deck_card_ids_by_tier()).items()}
+
+    def hidden_faceup_reveal_candidates(self) -> dict[str, list[int]]:
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return {str(k): [int(v) for v in values] for k, values in dict(self._env.hidden_faceup_reveal_candidates()).items()}
+
+    def hidden_reserved_reveal_candidates(self) -> dict[str, list[int]]:
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return {str(k): [int(v) for v in values] for k, values in dict(self._env.hidden_reserved_reveal_candidates()).items()}
+
+    def set_faceup_card(self, tier: int, slot: int, card_id: int) -> StepState:
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return self._to_step_state(self._env.set_faceup_card(int(tier), int(slot), int(card_id)))
+
+    def set_faceup_card_any(self, tier: int, slot: int, card_id: int) -> StepState:
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return self._to_step_state(self._env.set_faceup_card_any(int(tier), int(slot), int(card_id)))
+
+    def set_noble(self, slot: int, noble_id: int) -> StepState:
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return self._to_step_state(self._env.set_noble(int(slot), int(noble_id)))
+
+    def set_noble_any(self, slot: int, noble_id: int) -> StepState:
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return self._to_step_state(self._env.set_noble_any(int(slot), int(noble_id)))
+
+    def set_reserved_card(self, player_id: int, slot: int, card_id: int) -> StepState:
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return self._to_step_state(self._env.set_reserved_card(int(player_id), int(slot), int(card_id)))
+
     def close(self) -> None:
         self._closed = True
 

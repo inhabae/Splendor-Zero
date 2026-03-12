@@ -786,12 +786,20 @@ def _decode_board_state(
 
     cp_seat = _seat_str(cp_id)
     op_seat = _seat_str(op_id)
-    cp_reserved_total = len(cp_reserved) + len(pending_reserved_by_actor[cp_seat])
+    cp_pending_slots = set(pending_reserved_by_actor[cp_seat])
+    op_pending_slots = set(pending_reserved_by_actor[op_seat])
 
-    for slot in sorted(pending_reserved_by_actor[cp_seat]):
+    # Hide any still-pending reserved reveal, even if it is currently encoded
+    # in the current player's private state block.
+    cp_reserved = [card for card in cp_reserved if int(card.slot or 0) not in cp_pending_slots]
+    op_reserved = [card for card in op_reserved if int(card.slot or 0) not in op_pending_slots]
+
+    cp_reserved_total = len(cp_reserved) + len(cp_pending_slots)
+
+    for slot in sorted(cp_pending_slots):
         cp_reserved.append(_private_reserved_placeholder(slot))
 
-    for slot in sorted(pending_reserved_by_actor[op_seat]):
+    for slot in sorted(op_pending_slots):
         op_reserved.append(_private_reserved_placeholder(slot))
 
     private_op_reserved = max(op_reserved_total - len(op_reserved), 0)

@@ -1133,6 +1133,19 @@ button:disabled {
   filter: grayscale(0.15) brightness(0.96);
 }
 
+.tier-catalog-option.swap {
+  cursor: pointer;
+}
+
+.tier-catalog-option.swap:hover {
+  filter: grayscale(0.35) brightness(0.92);
+}
+
+.tier-catalog-option.swap .card-view {
+  opacity: 0.58;
+  filter: grayscale(0.75);
+}
+
 .tier-catalog-option.selected {
   border-color: #1f50db;
   background: #dce8ff;

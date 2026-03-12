@@ -77,6 +77,20 @@ py::list list_standard_nobles_py() {
     return out;
 }
 
+template <typename Container>
+auto find_card_by_id(Container& cards, int card_id) {
+    return std::find_if(cards.begin(), cards.end(), [card_id](const Card& card) {
+        return card.id == card_id;
+    });
+}
+
+template <typename Container>
+auto find_noble_by_id(Container& nobles, int noble_id) {
+    return std::find_if(nobles.begin(), nobles.end(), [noble_id](const Noble& noble) {
+        return noble.id == noble_id;
+    });
+}
+
 constexpr int kActionDim = state_encoder::ACTION_DIM;
 constexpr int kStateDim = state_encoder::STATE_DIM;
 constexpr int kCardFeatureLen = 11;
@@ -452,6 +466,276 @@ public:
         return choose_heuristic_action(encoded, mask);
     }
 
+    py::dict hidden_deck_card_ids_by_tier() const {
+        ensure_initialized();
+        py::dict out;
+        for (int tier = 0; tier < 3; ++tier) {
+            py::list ids;
+            for (const Card& card : state_.deck[static_cast<std::size_t>(tier)]) {
+                ids.append(py::int_(card.id));
+            }
+            out[py::int_(tier + 1)] = std::move(ids);
+        }
+        return out;
+    }
+
+    py::dict hidden_faceup_reveal_candidates() const {
+        ensure_initialized();
+        py::dict out;
+        const auto hidden_opponent_cards = hidden_opponent_reserved_cards_by_tier();
+        for (int tier = 0; tier < 3; ++tier) {
+            const auto& row = state_.faceup[static_cast<std::size_t>(tier)];
+            const auto& deck = state_.deck[static_cast<std::size_t>(tier)];
+            const auto& hidden_reserved = hidden_opponent_cards[static_cast<std::size_t>(tier)];
+            for (int slot = 0; slot < 4; ++slot) {
+                const Card& current = row[static_cast<std::size_t>(slot)];
+                if (current.id == 0) {
+                    continue;
+                }
+                py::list ids;
+                ids.append(py::int_(current.id));
+                for (const Card& card : deck) {
+                    ids.append(py::int_(card.id));
+                }
+                for (const Card& card : hidden_reserved) {
+                    ids.append(py::int_(card.id));
+                }
+                out[py::str(std::to_string(tier + 1) + ":" + std::to_string(slot))] = std::move(ids);
+            }
+        }
+        return out;
+    }
+
+    py::dict hidden_reserved_reveal_candidates() const {
+        ensure_initialized();
+        py::dict out;
+        for (int player_id = 0; player_id < 2; ++player_id) {
+            const auto& reserved = state_.players[static_cast<std::size_t>(player_id)].reserved;
+            for (int slot = 0; slot < static_cast<int>(reserved.size()); ++slot) {
+                const ReservedCard& current = reserved[static_cast<std::size_t>(slot)];
+                if (current.is_public || current.card.id <= 0) {
+                    continue;
+                }
+                const int tier = current.card.level - 1;
+                if (tier < 0 || tier >= 3) {
+                    throw std::runtime_error("Hidden reserved card has invalid tier");
+                }
+                py::list ids;
+                for (const Card& card : state_.deck[static_cast<std::size_t>(tier)]) {
+                    ids.append(py::int_(card.id));
+                }
+                for (int other_player = 0; other_player < 2; ++other_player) {
+                    const auto& other_reserved = state_.players[static_cast<std::size_t>(other_player)].reserved;
+                    for (const ReservedCard& other : other_reserved) {
+                        if (other.is_public || other.card.id <= 0 || other.card.level != tier + 1) {
+                            continue;
+                        }
+                        ids.append(py::int_(other.card.id));
+                    }
+                }
+                out[py::str(std::string(player_id == 0 ? "P0:" : "P1:") + std::to_string(slot))] = std::move(ids);
+            }
+        }
+        return out;
+    }
+
+    StepResult set_faceup_card(int tier, int slot, int card_id) {
+        ensure_initialized();
+        validate_tier(tier);
+        validate_faceup_slot(slot);
+        validate_positive_card_id(card_id);
+
+        Card& current = state_.faceup[static_cast<std::size_t>(tier)][static_cast<std::size_t>(slot)];
+        if (current.id <= 0) {
+            throw std::runtime_error("Face-up slot is empty");
+        }
+        if (current.id == card_id) {
+            return make_step_result();
+        }
+
+        auto& deck = state_.deck[static_cast<std::size_t>(tier)];
+        auto deck_it = find_card_by_id(deck, card_id);
+        if (deck_it != deck.end()) {
+            const Card replacement = *deck_it;
+            *deck_it = current;
+            current = replacement;
+            return make_step_result();
+        }
+
+        const int current_player = state_.current_player;
+        if (current_player < 0 || current_player >= 2) {
+            throw std::runtime_error("Current player out of range");
+        }
+        Player& opponent = state_.players[static_cast<std::size_t>(1 - current_player)];
+        for (ReservedCard& reserved : opponent.reserved) {
+            if (reserved.is_public || reserved.card.level != tier + 1 || reserved.card.id != card_id) {
+                continue;
+            }
+            std::swap(current, reserved.card);
+            return make_step_result();
+        }
+
+        throw std::runtime_error("Requested card is not available in the hidden candidate pool for that face-up slot");
+    }
+
+    StepResult set_faceup_card_any(int tier, int slot, int card_id) {
+        ensure_initialized();
+        validate_tier(tier);
+        validate_faceup_slot(slot);
+        validate_positive_card_id(card_id);
+
+        Card& current = state_.faceup[static_cast<std::size_t>(tier)][static_cast<std::size_t>(slot)];
+        if (current.id == card_id) {
+            return make_step_result();
+        }
+
+        auto& row = state_.faceup[static_cast<std::size_t>(tier)];
+        for (int other_slot = 0; other_slot < 4; ++other_slot) {
+            if (other_slot == slot) {
+                continue;
+            }
+            Card& other = row[static_cast<std::size_t>(other_slot)];
+            if (other.id == card_id) {
+                std::swap(current, other);
+                return make_step_result();
+            }
+        }
+
+        auto& deck = state_.deck[static_cast<std::size_t>(tier)];
+        auto deck_it = find_card_by_id(deck, card_id);
+        if (deck_it != deck.end()) {
+            const Card replacement = *deck_it;
+            if (current.id > 0) {
+                *deck_it = current;
+            } else {
+                deck.erase(deck_it);
+            }
+            current = replacement;
+            return make_step_result();
+        }
+
+        const auto& all_cards = standardCards();
+        auto standard_it = find_card_by_id(all_cards, card_id);
+        if (standard_it == all_cards.end()) {
+            throw std::runtime_error("Unknown card id");
+        }
+        if (standard_it->level != tier + 1) {
+            throw std::runtime_error("Requested card belongs to a different tier");
+        }
+        current = *standard_it;
+        return make_step_result();
+    }
+
+    StepResult set_noble(int slot, int noble_id) {
+        ensure_initialized();
+        validate_noble_slot(slot);
+        validate_positive_noble_id(noble_id);
+        if (slot >= state_.noble_count) {
+            throw std::runtime_error("Noble slot does not exist");
+        }
+
+        Noble& current = state_.available_nobles[static_cast<std::size_t>(slot)];
+        if (current.id == noble_id) {
+            return make_step_result();
+        }
+        for (int other_slot = 0; other_slot < state_.noble_count; ++other_slot) {
+            if (other_slot == slot) {
+                continue;
+            }
+            Noble& other = state_.available_nobles[static_cast<std::size_t>(other_slot)];
+            if (other.id == noble_id) {
+                std::swap(current, other);
+                return make_step_result();
+            }
+        }
+        throw std::runtime_error("Requested noble is not available among visible nobles");
+    }
+
+    StepResult set_noble_any(int slot, int noble_id) {
+        ensure_initialized();
+        validate_noble_slot(slot);
+        validate_positive_noble_id(noble_id);
+        if (slot >= state_.noble_count) {
+            state_.noble_count = slot + 1;
+        }
+
+        Noble& current = state_.available_nobles[static_cast<std::size_t>(slot)];
+        if (current.id == noble_id) {
+            return make_step_result();
+        }
+        for (int other_slot = 0; other_slot < state_.noble_count; ++other_slot) {
+            if (other_slot == slot) {
+                continue;
+            }
+            Noble& other = state_.available_nobles[static_cast<std::size_t>(other_slot)];
+            if (other.id == noble_id) {
+                std::swap(current, other);
+                return make_step_result();
+            }
+        }
+
+        const auto& nobles = standardNobles();
+        auto it = find_noble_by_id(nobles, noble_id);
+        if (it == nobles.end()) {
+            throw std::runtime_error("Unknown noble id");
+        }
+        current = *it;
+        return make_step_result();
+    }
+
+    StepResult set_reserved_card(int player_id, int slot, int card_id) {
+        ensure_initialized();
+        validate_player_id(player_id);
+        validate_reserved_slot(slot);
+        validate_positive_card_id(card_id);
+
+        auto& reserved = state_.players[static_cast<std::size_t>(player_id)].reserved;
+        if (slot >= static_cast<int>(reserved.size())) {
+            throw std::runtime_error("Reserved slot does not exist");
+        }
+
+        ReservedCard& current = reserved[static_cast<std::size_t>(slot)];
+        if (current.card.id <= 0) {
+            throw std::runtime_error("Reserved slot is empty");
+        }
+
+        const int tier = current.card.level - 1;
+        validate_tier(tier);
+
+        if (current.card.id == card_id) {
+            current.is_public = true;
+            return make_step_result();
+        }
+
+        auto& deck = state_.deck[static_cast<std::size_t>(tier)];
+        auto deck_it = find_card_by_id(deck, card_id);
+        if (deck_it != deck.end()) {
+            const Card replacement = *deck_it;
+            *deck_it = current.card;
+            current.card = replacement;
+            current.is_public = true;
+            return make_step_result();
+        }
+
+        for (int other_player_id = 0; other_player_id < 2; ++other_player_id) {
+            auto& other_reserved = state_.players[static_cast<std::size_t>(other_player_id)].reserved;
+            for (int other_slot = 0; other_slot < static_cast<int>(other_reserved.size()); ++other_slot) {
+                if (other_player_id == player_id && other_slot == slot) {
+                    continue;
+                }
+                ReservedCard& other = other_reserved[static_cast<std::size_t>(other_slot)];
+                if (other.is_public || other.card.level != tier + 1 || other.card.id != card_id) {
+                    continue;
+                }
+                std::swap(current.card, other.card);
+                current.is_public = true;
+                return make_step_result();
+            }
+        }
+
+        throw std::runtime_error("Requested card is not available in the hidden candidate pool for that reserved slot");
+    }
+
 private:
     void ensure_initialized() const {
         if (!initialized_) {
@@ -463,6 +747,69 @@ private:
         if (action_idx < 0 || action_idx >= kActionDim) {
             throw std::out_of_range("action_idx must be in [0, 68]");
         }
+    }
+
+    static void validate_tier(int tier) {
+        if (tier < 0 || tier >= 3) {
+            throw std::out_of_range("tier must be in [0, 2]");
+        }
+    }
+
+    static void validate_faceup_slot(int slot) {
+        if (slot < 0 || slot >= 4) {
+            throw std::out_of_range("face-up slot must be in [0, 3]");
+        }
+    }
+
+    static void validate_noble_slot(int slot) {
+        if (slot < 0 || slot >= 3) {
+            throw std::out_of_range("noble slot must be in [0, 2]");
+        }
+    }
+
+    static void validate_reserved_slot(int slot) {
+        if (slot < 0 || slot >= 3) {
+            throw std::out_of_range("reserved slot must be in [0, 2]");
+        }
+    }
+
+    static void validate_positive_card_id(int card_id) {
+        if (card_id <= 0) {
+            throw std::out_of_range("card_id must be positive");
+        }
+    }
+
+    static void validate_positive_noble_id(int noble_id) {
+        if (noble_id <= 0) {
+            throw std::out_of_range("noble_id must be positive");
+        }
+    }
+
+    static void validate_player_id(int player_id) {
+        if (player_id < 0 || player_id >= 2) {
+            throw std::out_of_range("player_id must be in [0, 1]");
+        }
+    }
+
+    std::array<std::vector<Card>, 3> hidden_opponent_reserved_cards_by_tier() const {
+        const int current_player = state_.current_player;
+        if (current_player < 0 || current_player >= 2) {
+            throw std::runtime_error("Current player out of range");
+        }
+        const int opponent = 1 - current_player;
+        std::array<std::vector<Card>, 3> out;
+        const auto& reserved = state_.players[static_cast<std::size_t>(opponent)].reserved;
+        for (const ReservedCard& card : reserved) {
+            if (card.is_public || card.card.id <= 0) {
+                continue;
+            }
+            const int tier = card.card.level - 1;
+            if (tier < 0 || tier >= 3) {
+                throw std::runtime_error("Hidden reserved card has invalid tier");
+            }
+            out[static_cast<std::size_t>(tier)].push_back(card.card);
+        }
+        return out;
     }
 
     StepResult make_step_result() const {
@@ -512,6 +859,14 @@ PYBIND11_MODULE(splendor_native, m) {
         .def("step", &NativeEnv::step, py::arg("action_idx"))
         .def("heuristic_action", &NativeEnv::heuristic_action)
         .def("debug_raw_state", &NativeEnv::debug_raw_state)
+        .def("hidden_deck_card_ids_by_tier", &NativeEnv::hidden_deck_card_ids_by_tier)
+        .def("hidden_faceup_reveal_candidates", &NativeEnv::hidden_faceup_reveal_candidates)
+        .def("hidden_reserved_reveal_candidates", &NativeEnv::hidden_reserved_reveal_candidates)
+        .def("set_faceup_card", &NativeEnv::set_faceup_card, py::arg("tier"), py::arg("slot"), py::arg("card_id"))
+        .def("set_faceup_card_any", &NativeEnv::set_faceup_card_any, py::arg("tier"), py::arg("slot"), py::arg("card_id"))
+        .def("set_noble", &NativeEnv::set_noble, py::arg("slot"), py::arg("noble_id"))
+        .def("set_noble_any", &NativeEnv::set_noble_any, py::arg("slot"), py::arg("noble_id"))
+        .def("set_reserved_card", &NativeEnv::set_reserved_card, py::arg("player_id"), py::arg("slot"), py::arg("card_id"))
         .def(
             "run_mcts",
             &NativeEnv::run_mcts,

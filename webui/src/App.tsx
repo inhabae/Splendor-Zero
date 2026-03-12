@@ -200,23 +200,11 @@ export function App() {
     if (nextSnapshot.pending_reveals.some((reveal) => isBlockingPendingReveal(reveal))) {
       return 'WAITING_REVEAL';
     }
-    if (nextSnapshot.config?.analysis_mode) {
-      return 'WAITING_PLAYER';
-    }
-    return nextSnapshot.player_to_move === nextSnapshot.config?.player_seat
-      ? 'WAITING_PLAYER'
-      : 'WAITING_ENGINE';
+    return 'WAITING_PLAYER';
   }
 
   function oppositeSeat(seat: Seat): Seat {
     return seat === 'P0' ? 'P1' : 'P0';
-  }
-
-  function shouldAutoSearch(nextSnapshot: GameSnapshotDTO): boolean {
-    return (
-      nextSnapshot.status === 'IN_PROGRESS' &&
-      !nextSnapshot.pending_reveals.some((reveal) => isBlockingPendingReveal(reveal))
-    );
   }
 
   function revealKey(zone: 'faceup_card' | 'reserved_card' | 'noble', tier: number, slot: number, seat?: Seat): string {
@@ -275,11 +263,15 @@ export function App() {
 
   async function startEngineThink(customNumSimulations?: number): Promise<void> {
     setError(null);
+    const requested = customNumSimulations ?? searchSimulations;
+    const fallback = snapshot?.config?.num_simulations ?? numSimulations;
+    const nextNumSimulations =
+      Number.isInteger(requested) && requested >= 1 && requested <= 10000
+        ? requested
+        : fallback;
     const think = await fetchJSON<EngineThinkResponse>('/api/game/engine-think', {
       method: 'POST',
-      body: JSON.stringify(
-        customNumSimulations != null ? { num_simulations: Number(customNumSimulations) } : { num_simulations: Number(searchSimulations) }
-      ),
+      body: JSON.stringify({ num_simulations: nextNumSimulations }),
     });
     setUiStatus('WAITING_ENGINE');
     clearPolling();
@@ -295,20 +287,7 @@ export function App() {
       setJobStatus(status);
       if (status.status === 'DONE') {
         clearPolling();
-        if (snapshot?.config?.analysis_mode) {
-          setUiStatus(snapshot.status === 'IN_PROGRESS' ? 'WAITING_PLAYER' : 'GAME_OVER');
-        } else {
-          const nextSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/engine-apply', {
-            method: 'POST',
-            body: JSON.stringify({ job_id: nextJobId }),
-          });
-          setSnapshot(nextSnapshot);
-          const nextUiStatus = deriveUiStatus(nextSnapshot);
-          setUiStatus(nextUiStatus);
-          if (nextUiStatus === 'WAITING_ENGINE') {
-            await startEngineThink();
-          }
-        }
+        setUiStatus(snapshot?.status === 'IN_PROGRESS' ? 'WAITING_PLAYER' : 'GAME_OVER');
       } else if (status.status === 'FAILED' || status.status === 'CANCELLED') {
         clearPolling();
         setUiStatus('WAITING_PLAYER');
@@ -389,9 +368,25 @@ export function App() {
       if (result.snapshot.status !== 'IN_PROGRESS') {
         return;
       }
-      if (shouldAutoSearch(result.snapshot)) {
+      if (result.engine_should_move) {
         await startEngineThink(searchSimulations);
       }
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function onApplyEngineMove(jobId: string): Promise<void> {
+    setError(null);
+    clearPolling();
+    try {
+      const nextSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/engine-apply', {
+        method: 'POST',
+        body: JSON.stringify({ job_id: jobId }),
+      });
+      setSnapshot(nextSnapshot);
+      setUiStatus(deriveUiStatus(nextSnapshot));
+      setJobStatus(null);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -408,9 +403,6 @@ export function App() {
       });
       setSnapshot(nextSnapshot);
       setUiStatus(deriveUiStatus(nextSnapshot));
-      if (shouldAutoSearch(nextSnapshot)) {
-        await startEngineThink(searchSimulations);
-      }
     } catch (err) {
       setError((err as Error).message);
     }
@@ -427,9 +419,6 @@ export function App() {
       });
       setSnapshot(nextSnapshot);
       setUiStatus(deriveUiStatus(nextSnapshot));
-      if (shouldAutoSearch(nextSnapshot)) {
-        await startEngineThink(searchSimulations);
-      }
     } catch (err) {
       setError((err as Error).message);
     }
@@ -459,7 +448,7 @@ export function App() {
       });
       const status = deriveUiStatus(result.snapshot);
       setUiStatus(status);
-      if (shouldAutoSearch(result.snapshot)) {
+      if (result.engine_should_move) {
         await startEngineThink(searchSimulations);
       }
     } catch (err) {
@@ -491,7 +480,7 @@ export function App() {
       });
       const status = deriveUiStatus(result.snapshot);
       setUiStatus(status);
-      if (shouldAutoSearch(result.snapshot)) {
+      if (result.engine_should_move) {
         await startEngineThink(searchSimulations);
       }
     } catch (err) {
@@ -523,7 +512,7 @@ export function App() {
       });
       const status = deriveUiStatus(result.snapshot);
       setUiStatus(status);
-      if (shouldAutoSearch(result.snapshot)) {
+      if (result.engine_should_move) {
         await startEngineThink(searchSimulations);
       }
     } catch (err) {
@@ -567,9 +556,13 @@ export function App() {
 
   const canStart = Boolean(selectedCheckpoint) && numSimulations > 0 && numSimulations <= 10000;
   const canMove =
-    uiStatus === 'WAITING_PLAYER' &&
     snapshot?.status === 'IN_PROGRESS' &&
+    snapshot.player_to_move === snapshot.config?.player_seat &&
     !(snapshot.pending_reveals?.some((reveal) => isBlockingPendingReveal(reveal)) ?? false);
+  const isEngineTurn =
+    snapshot?.status === 'IN_PROGRESS' &&
+    snapshot.player_to_move !== snapshot.config?.player_seat;
+  const engineChosenActionIdx = jobStatus?.status === 'DONE' ? jobStatus.result?.action_idx ?? null : null;
   const activeReveal = useMemo(() => {
     if (!snapshot || !activeRevealKey) {
       return null;
@@ -735,6 +728,23 @@ export function App() {
     }
     return ids;
   }, [activeReveal, isSetupLikeView, displayBoard, catalogCards]);
+  const occupiedBoardCardIds = useMemo(() => {
+    if (!activeReveal || activeReveal.zone !== 'faceup_card' || !displayBoard) {
+      return new Set<number>();
+    }
+    const ids = new Set<number>();
+    const cards = displayBoard.tiers.find((tier) => tier.tier === activeReveal.tier)?.cards ?? [];
+    for (const card of cards) {
+      if (card.slot === activeReveal.slot || card.is_placeholder) {
+        continue;
+      }
+      const id = findCatalogCardId(card);
+      if (id != null) {
+        ids.add(id);
+      }
+    }
+    return ids;
+  }, [activeReveal, displayBoard, catalogCards]);
   const setupUnavailableNobleIds = useMemo(() => {
     if (!activeReveal || activeReveal.zone !== 'noble' || !isSetupLikeView || activeReveal.reason !== 'initial_noble_setup' || !displayBoard) {
       return new Set<number>();
@@ -768,14 +778,16 @@ export function App() {
           ? (snapshot.hidden_faceup_reveal_candidates[pendingKey] ?? [])
           : (snapshot.hidden_deck_card_ids_by_tier[activeReveal.tier] ?? []),
       );
-      const tierCards = displayBoard?.tiers.find((tier) => tier.tier === activeReveal.tier)?.cards ?? [];
-      for (const card of tierCards) {
-        if (card.is_placeholder) {
-          continue;
-        }
-        const id = findCatalogCardId(card);
-        if (id != null) {
-          ids.add(id);
+      if (!hasPendingFaceupReveal) {
+        const tierCards = displayBoard?.tiers.find((tier) => tier.tier === activeReveal.tier)?.cards ?? [];
+        for (const card of tierCards) {
+          if (card.is_placeholder) {
+            continue;
+          }
+          const id = findCatalogCardId(card);
+          if (id != null) {
+            ids.add(id);
+          }
         }
       }
       return ids;
@@ -785,6 +797,14 @@ export function App() {
     }
     return new Set<number>();
   }, [activeReveal, snapshot, displayBoard, catalogCards]);
+  const hasPendingFaceupReveal = useMemo(() => {
+    if (!activeReveal || activeReveal.zone !== 'faceup_card' || !snapshot) {
+      return false;
+    }
+    return snapshot.pending_reveals.some(
+      (reveal) => reveal.zone === 'faceup_card' && reveal.tier === activeReveal.tier && reveal.slot === activeReveal.slot,
+    );
+  }, [activeReveal, snapshot]);
   const liveActionsPageCount = useMemo(
     () => Math.max(1, Math.ceil(liveRows.length / ACTIONS_PAGE_SIZE)),
     [liveRows.length],
@@ -960,23 +980,40 @@ export function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {pagedLiveRows.map(({ action, modelProb }) => (
+                    {pagedLiveRows.map(({ action, modelProb }) => {
+                      const canApplyEngineChoice =
+                        Boolean(isEngineTurn) &&
+                        jobStatus?.status === 'DONE' &&
+                        action.action_idx === engineChosenActionIdx;
+                      const rowClickable = canMove || canApplyEngineChoice;
+                      return (
                       <tr
                         key={`live-${action.action_idx}`}
-                        className={`action-row ${liveMctsTopAction?.action_idx === action.action_idx ? 'mcts-best' : ''} ${liveModelTopAction?.action_idx === action.action_idx ? 'model-best' : ''} ${canMove ? 'clickable' : ''}`}
+                        className={`action-row ${liveMctsTopAction?.action_idx === action.action_idx ? 'mcts-best' : ''} ${liveModelTopAction?.action_idx === action.action_idx ? 'model-best' : ''} ${rowClickable ? 'clickable' : ''}`}
                         onClick={() => {
-                          if (!canMove) return;
-                          void onPlayerMove(action.action_idx);
-                        }}
-                        onKeyDown={(event) => {
-                          if (!canMove) return;
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault();
+                          if (canMove) {
                             void onPlayerMove(action.action_idx);
+                            return;
+                          }
+                          if (canApplyEngineChoice && jobStatus?.job_id) {
+                            void onApplyEngineMove(jobStatus.job_id);
                           }
                         }}
-                        role={canMove ? 'button' : undefined}
-                        tabIndex={canMove ? 0 : undefined}
+                        onKeyDown={(event) => {
+                          if (!rowClickable) return;
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            if (canMove) {
+                              void onPlayerMove(action.action_idx);
+                              return;
+                            }
+                            if (canApplyEngineChoice && jobStatus?.job_id) {
+                              void onApplyEngineMove(jobStatus.job_id);
+                            }
+                          }
+                        }}
+                        role={rowClickable ? 'button' : undefined}
+                        tabIndex={rowClickable ? 0 : undefined}
                       >
                         <td>
                           <ActionLabel actionIdx={action.action_idx} board={snapshot.board_state} />
@@ -988,7 +1025,8 @@ export function App() {
                           <span className="policy-value">{(modelProb * 100).toFixed(2)}%</span>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
                 {liveRows.length > ACTIONS_PAGE_SIZE && (
@@ -1085,11 +1123,18 @@ export function App() {
                       <div className="tier-catalog-cards">
                         {cardsByTierAndColor[activeReveal.tier][color].map((card) => {
                           const isSetup = isSetupLikeView && activeReveal.zone === 'faceup_card' && activeReveal.reason === 'initial_setup';
-                          const isAvailable = isSetup ? !setupUnavailableCardIds.has(card.id) : liveAvailableCardIds.has(card.id);
+                          const isRefillFaceup = activeReveal.zone === 'faceup_card' && (isSetup || hasPendingFaceupReveal);
+                          const allowOccupiedSwap =
+                            activeReveal.zone === 'faceup_card' &&
+                            !isRefillFaceup &&
+                            activeReveal.reason !== 'replacement_after_reserve';
+                          const isOccupiedSwap = allowOccupiedSwap && occupiedBoardCardIds.has(card.id);
+                          const isAvailable = isSetup ? !setupUnavailableCardIds.has(card.id) : (liveAvailableCardIds.has(card.id) || isOccupiedSwap);
+                          const optionClass = isAvailable ? (isOccupiedSwap ? 'swap' : 'available') : 'unavailable';
                           return (
                             <div
                               key={`tier-catalog-card-${card.id}`}
-                              className={`tier-catalog-option ${isAvailable ? 'available' : 'unavailable'}`}
+                              className={`tier-catalog-option ${optionClass}`}
                               onClick={() => {
                                 if (!isAvailable) return;
                                 if (activeReveal.zone === 'reserved_card') {
