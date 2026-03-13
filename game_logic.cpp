@@ -496,6 +496,21 @@ void testHook_validateMoveForApply(const GameState& state, const Move& move) {
 }
 #endif
 
+static void resolveNobleAndEndTurn(GameState& state, int p) {
+    std::vector<int> claimable = getClaimableNobleIndices(state, p);
+    if (claimable.size() == 1) {
+        claimNobleByIndex(state, p, claimable[0]);
+    } else if (claimable.size() > 1) {
+        state.is_return_phase = false;
+        state.is_noble_choice_phase = true;
+        return;
+    }
+    state.is_return_phase = false;
+    state.is_noble_choice_phase = false;
+    state.current_player = 1 - p;
+    state.move_number++;
+}
+
 // ─── applyMove ────────────────────────────────────────
 void applyMove(GameState& state, const Move& move) {
     validateMoveForApply(state, move);
@@ -546,21 +561,7 @@ void applyMove(GameState& state, const Move& move) {
                 refillSlot(state, tier, slot);
             }
 
-            // Noble handling: explicit choice only when multiple nobles are claimable.
-            std::vector<int> claimable = getClaimableNobleIndices(state, p);
-            if (claimable.size() == 1) {
-                claimNobleByIndex(state, p, claimable[0]);
-            } else if (claimable.size() > 1) {
-                state.is_return_phase = false;
-                state.is_noble_choice_phase = true;
-                break; // same player must choose noble before turn ends
-            }
-
-            // End turn
-            state.is_return_phase = false;
-            state.is_noble_choice_phase = false;
-            state.current_player  = 1 - p;
-            state.move_number++;
+            resolveNobleAndEndTurn(state, p);
             break;
         }
 
@@ -590,10 +591,7 @@ void applyMove(GameState& state, const Move& move) {
                 state.is_return_phase = true;
                 state.is_noble_choice_phase = false;
             } else {
-                state.is_return_phase = false;
-                state.is_noble_choice_phase = false;
-                state.current_player  = 1 - p;
-                state.move_number++;
+                resolveNobleAndEndTurn(state, p);
             }
             break;
         }
@@ -607,10 +605,7 @@ void applyMove(GameState& state, const Move& move) {
                 state.is_return_phase = true;
                 state.is_noble_choice_phase = false;
             } else {
-                state.is_return_phase = false;
-                state.is_noble_choice_phase = false;
-                state.current_player  = 1 - p;
-                state.move_number++;
+                resolveNobleAndEndTurn(state, p);
             }
             break;
         }
@@ -625,19 +620,13 @@ void applyMove(GameState& state, const Move& move) {
                 state.is_return_phase = true;
                 state.is_noble_choice_phase = false;
             } else {
-                state.is_return_phase = false;
-                state.is_noble_choice_phase = false;
-                state.current_player  = 1 - p;
-                state.move_number++;
+                resolveNobleAndEndTurn(state, p);
             }
             break;
         }
 
         case PASS_TURN: {
-            state.is_return_phase = false;
-            state.is_noble_choice_phase = false;
-            state.current_player  = 1 - p;
-            state.move_number++;
+            resolveNobleAndEndTurn(state, p);
             break;
         }
         case CHOOSE_NOBLE: {
