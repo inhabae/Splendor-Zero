@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: splendor-spendee
-    env: docker
-    plan: free
-    healthCheckPath: /healthz
-    autoDeploy: true
