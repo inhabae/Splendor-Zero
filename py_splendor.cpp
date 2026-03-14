@@ -1275,7 +1275,6 @@ PYBIND11_MODULE(splendor_native, m) {
     py::class_<NativeMCTSResult>(m, "NativeMCTSResult")
         .def_property_readonly("visit_probs", &NativeMCTSResult::visit_probs_array)
         .def_readonly("chosen_action_idx", &NativeMCTSResult::chosen_action_idx)
-        .def_readonly("root_value", &NativeMCTSResult::root_value)
         .def_readonly("root_best_value", &NativeMCTSResult::root_best_value);
 
     py::class_<NativeEnv>(m, "NativeEnv")

@@ -17,7 +17,6 @@ from .shadow_state import ShadowState
 class DeterminizedPolicyResult:
     action_idx: int
     visit_probs: np.ndarray
-    root_value_mean: float
     root_best_value_mean: float
     num_determinizations: int
 
@@ -56,7 +55,6 @@ class DeterminizedMCTSPolicy:
         return DeterminizedPolicyResult(
             action_idx=action_idx,
             visit_probs=visit_probs.astype(np.float32, copy=False),
-            root_value_mean=float(result.root_value),
             root_best_value_mean=float(result.root_best_value),
             num_determinizations=1,
         )
@@ -106,7 +104,6 @@ class DeterminizedMCTSPolicy:
                 current_result = DeterminizedPolicyResult(
                     action_idx=action_idx,
                     visit_probs=visit_probs.astype(np.float32, copy=False),
-                    root_value_mean=float(result.root_value),
                     root_best_value_mean=float(result.root_best_value),
                     num_determinizations=1,
                 )

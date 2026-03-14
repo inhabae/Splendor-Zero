@@ -253,7 +253,6 @@ class EngineResultDTO(BaseModel):
     action_idx: int
     action_details: list[ActionVizDTO] = Field(default_factory=list)
     model_action_details: list[ActionVizDTO] | None = None
-    root_value: float | None = None
 
 
 class EngineJobStatusDTO(BaseModel):
@@ -386,7 +385,6 @@ class EngineJob:
     error: str | None = None
     action_details: list[ActionVizDTO] | None = None
     model_action_details: list[ActionVizDTO] | None = None
-    root_value: float | None = None
 
 
 @dataclass
@@ -1362,7 +1360,6 @@ class GameManager:
                         if model_eval is not None:
                             model_policy, _ = model_eval
                             cur_job.model_action_details = _action_viz_rows(step.mask, model_policy, int(result.chosen_action_idx))
-                        cur_job.root_value = float(result.root_value)
                         if self._active_job_id == job.job_id:
                             self._active_job_id = None
                         return int(result.chosen_action_idx)
@@ -1389,7 +1386,6 @@ class GameManager:
                     action_idx=job.action_idx,
                     action_details=job.action_details or [],
                     model_action_details=job.model_action_details,
-                    root_value=job.root_value,
                 )
                 if job.action_idx is not None
                 else None

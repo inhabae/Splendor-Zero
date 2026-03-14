@@ -832,7 +832,6 @@ class SpendeeBridgeRunner:
                         {
                             "action_idx": decision.action_idx,
                             "action_indices": action_indices,
-                            "root_value_mean": decision.root_value_mean,
                             "root_best_value_mean": decision.root_best_value_mean,
                             "num_determinizations": decision.num_determinizations,
                             "current_turn_seat": observed.current_turn_seat,
