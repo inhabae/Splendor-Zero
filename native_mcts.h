@@ -11,9 +11,11 @@
 struct NativeMCTSResult {
     int chosen_action_idx = 0;
     std::array<float, 69> visit_probs{};
+    std::array<float, 69> q_values{};
     float root_best_value = 0.0f;
 
     pybind11::array_t<float> visit_probs_array() const;
+    pybind11::array_t<float> q_values_array() const;
 };
 
 // Note: search performs per-simulation root determinization by shuffling hidden

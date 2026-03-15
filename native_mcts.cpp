@@ -517,6 +517,12 @@ pybind11::array_t<float> NativeMCTSResult::visit_probs_array() const {
     return arr;
 }
 
+pybind11::array_t<float> NativeMCTSResult::q_values_array() const {
+    pybind11::array_t<float> arr(kActionDim);
+    std::memcpy(arr.mutable_data(), q_values.data(), sizeof(float) * static_cast<std::size_t>(kActionDim));
+    return arr;
+}
+
 NativeMCTSResult run_native_mcts(
     const GameState& root_state,
     pybind11::function evaluator,
@@ -805,6 +811,7 @@ NativeMCTSResult run_native_mcts(
                     }
                     if (!node.expanded) {
                         if (node.pending_eval) {
+                            rollback_virtual_path(path);
                             break;
                         }
                         node.pending_eval = true;
@@ -818,16 +825,18 @@ NativeMCTSResult run_native_mcts(
                         break;
                     }
 
-                    const int action = select_puct_action(
-                        nodes,
+                    const int action = select_puct_action_with_pending_flags(
+                        node,
                         node_index,
                         node_data.mask,
                         c_puct,
                         eps,
+                        pending_flags.get(),
                         use_forced_playouts,
                         forced_playouts_k
                     );
                     if (action < 0) {
+                        rollback_virtual_path(path);
                         break;
                     }
 
@@ -840,11 +849,13 @@ NativeMCTSResult run_native_mcts(
                         child_idx = alloc;
                         node.child_index[static_cast<std::size_t>(action)] = child_idx;
                     }
+                    node.visit_count[static_cast<std::size_t>(action)] += 1;
+                    node.value_sum[static_cast<std::size_t>(action)] -= kVirtualLoss;
 
                     const int parent_to_play = node_data.terminal.current_player_id;
                     applyMove(sim_state, actionIndexToMove(action));
                     const bool same_player = sim_state.current_player == parent_to_play;
-                    path.push_back(PathStep{node_index, action, same_player, false});
+                    path.push_back(PathStep{node_index, action, same_player, true});
                     node_index = child_idx;
                 }
             }
@@ -1001,14 +1012,8 @@ NativeMCTSResult run_native_mcts(
         }
 
         pybind11::gil_scoped_release release;
-        if (tree_workers <= 1) {
-            for (ReadyBackup& ready : backups) {
-                apply_ready_backup_serial(ready);
-            }
-        } else {
-            for (ReadyBackup& ready : backups) {
-                apply_ready_backup_virtual(ready);
-            }
+        for (ReadyBackup& ready : backups) {
+            apply_ready_backup_virtual(ready);
         }
 
         completed += static_cast<int>(backups.size());
@@ -1030,6 +1035,14 @@ NativeMCTSResult run_native_mcts(
         );
     } else {
         result.visit_probs = raw_visit_probs;
+    }
+
+    for (int a = 0; a < kActionDim; ++a) {
+        const int n = root.visit_count[static_cast<std::size_t>(a)];
+        result.q_values[static_cast<std::size_t>(a)] =
+            (n <= 0)
+                ? 0.0f
+                : (root.value_sum[static_cast<std::size_t>(a)] / static_cast<float>(n));
     }
 
     int best_visit_action = -1;
