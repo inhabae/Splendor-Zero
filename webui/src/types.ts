@@ -157,6 +157,7 @@ export interface ActionVizDTO {
   label: string;
   masked: boolean;
   policy_prob: number;
+  q_value?: number | null;
   is_selected: boolean;
   placement_hint: PlacementHintDTO;
 }

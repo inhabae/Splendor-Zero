@@ -39,12 +39,9 @@ from .state_schema import (
     NOBLES_START,
     OP_BONUSES_START,
     OP_POINTS_IDX,
-    OPPONENT_RESERVED_SLOT_LEN,
-    OP_RESERVED_IS_OCCUPIED_OFFSET,
+    OP_RESERVED_COUNT_IDX,
     OP_RESERVED_START,
-    OP_RESERVED_TIER_OFFSET,
     OP_TOKENS_START,
-    PLAYER_INDEX_IDX,
     STATE_DIM,
 )
 
@@ -214,7 +211,7 @@ class EngineApplyRequest(BaseModel):
 
 
 class EngineThinkRequest(BaseModel):
-    num_simulations: int | None = Field(default=None, ge=1, le=10000)
+    num_simulations: int | None = Field(default=None, ge=1)
 
 
 class RevealCardRequest(BaseModel):
@@ -297,6 +294,7 @@ class ActionVizDTO(BaseModel):
     label: str
     masked: bool
     policy_prob: float
+    q_value: float | None = None
     is_selected: bool
     placement_hint: PlacementHintDTO
 
@@ -482,14 +480,7 @@ def _manual_reveal_for_action(action_idx: int, actor: str, step_after: StepState
     if 27 <= action_idx <= 29:
         actor_seat = _seat_str(0 if actor == "P0" else 1)
         if step_after.current_player_id in (0, 1) and _seat_str(step_after.current_player_id) != actor_seat:
-            occupied_reserved = 0
-            for i in range(3):
-                slot_block = _safe_slice(
-                    step_after.state,
-                    OP_RESERVED_START + i * OPPONENT_RESERVED_SLOT_LEN,
-                    OPPONENT_RESERVED_SLOT_LEN,
-                )
-                occupied_reserved += int(round(float(slot_block[OP_RESERVED_IS_OCCUPIED_OFFSET])))
+            occupied_reserved = _to_int(step_after.state[OP_RESERVED_COUNT_IDX], scale=3.0, max_hint=3)
             slot = occupied_reserved - 1
         else:
             visible_reserved = 0
@@ -571,15 +562,24 @@ def _placement_hint_for_action(action_idx: int) -> PlacementHintDTO:
     return PlacementHintDTO(zone="other")
 
 
-def _action_viz_rows(mask: np.ndarray, policy: np.ndarray, selected_action: int) -> list[ActionVizDTO]:
+def _action_viz_rows(
+    mask: np.ndarray,
+    policy: np.ndarray,
+    selected_action: int,
+    q_values: np.ndarray | None = None,
+) -> list[ActionVizDTO]:
     out: list[ActionVizDTO] = []
     for action_idx in range(ACTION_DIM):
+        q_value = None
+        if q_values is not None:
+            q_value = float(q_values[action_idx])
         out.append(
             ActionVizDTO(
                 action_idx=int(action_idx),
                 label=_describe_action(action_idx),
                 masked=not bool(mask[action_idx]),
                 policy_prob=float(policy[action_idx]),
+                q_value=q_value,
                 is_selected=(int(selected_action) == int(action_idx)),
                 placement_hint=_placement_hint_for_action(action_idx),
             )
@@ -774,20 +774,12 @@ def _decode_board_state(
             cp_reserved.append(card)
 
     op_reserved: list[CardDTO] = []
-    op_reserved_total = 0
     for i in range(3):
-        slot_block = _safe_slice(state, OP_RESERVED_START + i * OPPONENT_RESERVED_SLOT_LEN, OPPONENT_RESERVED_SLOT_LEN)
-        card = _decode_card(slot_block[:CARD_FEATURE_LEN], source="reserved_public", slot=i)
-        is_occupied = bool(round(float(slot_block[OP_RESERVED_IS_OCCUPIED_OFFSET])))
-        encoded_tier = _to_int(slot_block[OP_RESERVED_TIER_OFFSET], scale=3.0, max_hint=3)
-        if is_occupied:
-            op_reserved_total += 1
+        block = _safe_slice(state, OP_RESERVED_START + i * CARD_FEATURE_LEN, CARD_FEATURE_LEN)
+        card = _decode_card(block, source="reserved_public", slot=i)
         if card is not None:
             op_reserved.append(card)
-        elif is_occupied:
-            if encoded_tier not in (1, 2, 3):
-                raise ValueError(f"Opponent reserved slot {i} has invalid encoded tier {encoded_tier}")
-            op_reserved.append(_private_reserved_placeholder(i))
+    op_reserved_total = _to_int(state[OP_RESERVED_COUNT_IDX], scale=3.0, max_hint=3)
 
     pending_reveals = pending_reveals or []
     pending_reserved_by_actor: dict[str, list[int]] = {"P0": [], "P1": []}
@@ -795,17 +787,9 @@ def _decode_board_state(
         if item.zone == "reserved_card" and item.actor in ("P0", "P1"):
             pending_reserved_by_actor[item.actor].append(int(item.slot))
 
-    encoded_player_index = int(round(float(state[PLAYER_INDEX_IDX])))
-    if encoded_player_index not in (0, 1):
-        raise ValueError(f"Unexpected player_index in state vector: {encoded_player_index}")
-
     cp_id = int(step.current_player_id)
     if cp_id not in (0, 1):
         raise ValueError(f"Unexpected current_player_id: {cp_id}")
-    if encoded_player_index != cp_id:
-        raise ValueError(
-            f"State vector player_index {encoded_player_index} does not match current_player_id {cp_id}"
-        )
     op_id = 1 - cp_id
 
     cp_seat = _seat_str(cp_id)
@@ -826,6 +810,12 @@ def _decode_board_state(
     for slot in sorted(op_pending_slots):
         if all(int(card.slot or -1) != slot for card in op_reserved):
             op_reserved.append(_private_reserved_placeholder(slot))
+    while len(op_reserved) < op_reserved_total:
+        next_slot = len(op_reserved)
+        if all(int(card.slot or -1) != next_slot for card in op_reserved):
+            op_reserved.append(_private_reserved_placeholder(next_slot))
+        else:
+            break
 
     cp_reserved.sort(key=lambda card: int(card.slot or 0))
     op_reserved.sort(key=lambda card: int(card.slot or 0))
@@ -993,6 +983,7 @@ class GameManager:
         self._jobs: dict[str, EngineJob] = {}
         self._forced_winner: int | None = None
         self._pending_reveals: list[PendingReveal] = []
+        self._setup_event_log: list[GameEvent] = []
         self._event_log: list[GameEvent] = []
         self._redo_log: list[GameEvent] = []
 
@@ -1054,6 +1045,7 @@ class GameManager:
             self._rng = random.Random(seed)
             self._forced_winner = None
             self._pending_reveals = _initial_setup_pending_reveals() if bool(req.manual_reveal_mode) else []
+            self._setup_event_log = []
             self._event_log = []
             self._redo_log = []
             return self._snapshot_locked()
@@ -1159,6 +1151,14 @@ class GameManager:
             if pending is not None:
                 self._pending_reveals.append(pending)
 
+    def _record_event_locked(self, event: GameEvent) -> None:
+        if event.kind in ("reveal_card", "reveal_reserved_card", "reveal_noble") and not self._move_log:
+            self._setup_event_log.append(event)
+            self._redo_log = []
+            return
+        self._event_log.append(event)
+        self._redo_log = []
+
     def _apply_event_locked(self, env: SplendorNativeEnv, event: GameEvent) -> None:
         if event.kind == "move":
             if event.action_idx is None or event.actor is None:
@@ -1240,6 +1240,8 @@ class GameManager:
         self._forced_winner = None
         self._pending_reveals = _initial_setup_pending_reveals() if self._config.manual_reveal_mode else []
         self._event_log = []
+        for event in self._setup_event_log:
+            self._apply_event_locked(env, event)
         for event in events:
             self._apply_event_locked(env, event)
             self._event_log.append(event)
@@ -1264,8 +1266,7 @@ class GameManager:
             actor = _seat_str(step.current_player_id)
             step_after = env.step(int(req.action_idx))
             self._append_move_locked(actor, int(req.action_idx), step_after)
-            self._event_log.append(GameEvent(kind="move", actor=actor, action_idx=int(req.action_idx)))
-            self._redo_log = []
+            self._record_event_locked(GameEvent(kind="move", actor=actor, action_idx=int(req.action_idx)))
             snapshot = self._snapshot_locked()
             engine_should_move = (
                 snapshot.status == "IN_PROGRESS"
@@ -1350,7 +1351,12 @@ class GameManager:
                             raise RuntimeError("Engine job cancelled")
                         cur_job.status = "DONE"
                         cur_job.action_idx = int(result.chosen_action_idx)
-                        cur_job.action_details = _action_viz_rows(step.mask, result.visit_probs, int(result.chosen_action_idx))
+                        cur_job.action_details = _action_viz_rows(
+                            step.mask,
+                            result.visit_probs,
+                            int(result.chosen_action_idx),
+                            result.q_values,
+                        )
                         model_eval = _evaluate_model_replay_state(
                             {"checkpoint_path": str(config.checkpoint_path)},
                             step.state,
@@ -1419,7 +1425,7 @@ class GameManager:
             actor = _seat_str(step.current_player_id)
             step_after = env.step(int(job.action_idx))
             self._append_move_locked(actor, int(job.action_idx), step_after)
-            self._event_log.append(GameEvent(kind="move", actor=actor, action_idx=int(job.action_idx)))
+            self._record_event_locked(GameEvent(kind="move", actor=actor, action_idx=int(job.action_idx)))
             return self._snapshot_locked()
 
     def reveal_faceup_card(self, req: RevealCardRequest) -> RevealCardResponse:
@@ -1448,8 +1454,7 @@ class GameManager:
 
             if pending_index is not None:
                 self._pending_reveals.pop(pending_index)
-            self._event_log.append(GameEvent(kind="reveal_card", tier=req.tier, slot=req.slot, card_id=req.card_id))
-            self._redo_log = []
+            self._record_event_locked(GameEvent(kind="reveal_card", tier=req.tier, slot=req.slot, card_id=req.card_id))
             snapshot = self._snapshot_locked()
             engine_should_move = (
                 snapshot.status == "IN_PROGRESS"
@@ -1465,9 +1470,6 @@ class GameManager:
                 raise HTTPException(status_code=400, detail="Manual reveal mode is not enabled")
             if self._forced_winner is not None:
                 raise HTTPException(status_code=400, detail="Game already finished")
-            if not self._pending_reveals:
-                raise HTTPException(status_code=400, detail="No pending reveals")
-
             pending_index = next(
                 (
                     idx
@@ -1477,17 +1479,10 @@ class GameManager:
                 None,
             )
             allow_setup_edit = self._has_initial_setup_pending_locked()
-            if pending_index is None and not allow_setup_edit:
-                raise HTTPException(status_code=400, detail="That noble slot is not awaiting setup")
-
-            if allow_setup_edit:
-                env.set_noble_any(req.slot, req.noble_id)
-            else:
-                env.set_noble(req.slot, req.noble_id)
+            env.set_noble_any(req.slot, req.noble_id)
             if pending_index is not None:
                 self._pending_reveals.pop(pending_index)
-            self._event_log.append(GameEvent(kind="reveal_noble", slot=req.slot, noble_id=req.noble_id))
-            self._redo_log = []
+            self._record_event_locked(GameEvent(kind="reveal_noble", slot=req.slot, noble_id=req.noble_id))
             snapshot = self._snapshot_locked()
             engine_should_move = (
                 snapshot.status == "IN_PROGRESS"
@@ -1503,9 +1498,6 @@ class GameManager:
                 raise HTTPException(status_code=400, detail="Manual reveal mode is not enabled")
             if self._forced_winner is not None:
                 raise HTTPException(status_code=400, detail="Game already finished")
-            if not self._pending_reveals:
-                raise HTTPException(status_code=400, detail="No pending reveals")
-
             pending_index = next(
                 (
                     idx
@@ -1514,13 +1506,10 @@ class GameManager:
                 ),
                 None,
             )
-            if pending_index is None:
-                raise HTTPException(status_code=400, detail="That reserved slot is not awaiting a manual reveal")
-
             env.set_reserved_card(0 if req.seat == "P0" else 1, req.slot, req.card_id)
-            self._pending_reveals.pop(pending_index)
-            self._event_log.append(GameEvent(kind="reveal_reserved_card", actor=req.seat, slot=req.slot, card_id=req.card_id))
-            self._redo_log = []
+            if pending_index is not None:
+                self._pending_reveals.pop(pending_index)
+            self._record_event_locked(GameEvent(kind="reveal_reserved_card", actor=req.seat, slot=req.slot, card_id=req.card_id))
             snapshot = self._snapshot_locked()
             engine_should_move = (
                 snapshot.status == "IN_PROGRESS"
@@ -1536,8 +1525,7 @@ class GameManager:
                 return self._snapshot_locked()
             self._cancel_active_job_locked()
             self._forced_winner = 1 if config.player_seat == "P0" else 0
-            self._event_log.append(GameEvent(kind="resign"))
-            self._redo_log = []
+            self._record_event_locked(GameEvent(kind="resign"))
             return self._snapshot_locked()
 
     def undo(self) -> GameSnapshotDTO:

@@ -17,7 +17,7 @@ import { CardView } from './components/board/CardView';
 import { NobleView } from './components/board/NobleView';
 
 type UiStatus = 'IDLE' | 'WAITING_ENGINE' | 'WAITING_PLAYER' | 'WAITING_REVEAL' | 'GAME_OVER';
-type HomeView = 'HOME' | 'QUICK' | 'SETUP' | 'DEV';
+type HomeView = 'HOME' | 'QUICK' | 'SETUP' | 'ANALYSIS';
 const COLOR_ORDER: CatalogCardDTO['bonus_color'][] = ['white', 'blue', 'green', 'red', 'black'];
 
 const POLL_MS = 400;
@@ -71,7 +71,6 @@ export function App() {
   const [numSimulations] = useState(400);
   const [searchSimulations, setSearchSimulations] = useState(400);
   const [playerSeat] = useState<Seat>('P0');
-  const [setupEngineSeat, setSetupEngineSeat] = useState<Seat>('P0');
   const [seed] = useState('');
   const [homeView, setHomeView] = useState<HomeView>('HOME');
   const [revealSelections, setRevealSelections] = useState<Record<string, string>>({});
@@ -85,7 +84,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
-  const isSetupLikeView = homeView === 'SETUP' || homeView === 'DEV';
+  const isSetupLikeView = homeView === 'SETUP' || homeView === 'ANALYSIS';
 
   const selectedCheckpoint = useMemo(
     () => checkpoints.find((item) => item.id === checkpointId) ?? null,
@@ -203,12 +202,26 @@ export function App() {
     return 'WAITING_PLAYER';
   }
 
-  function oppositeSeat(seat: Seat): Seat {
-    return seat === 'P0' ? 'P1' : 'P0';
-  }
-
   function revealKey(zone: 'faceup_card' | 'reserved_card' | 'noble', tier: number, slot: number, seat?: Seat): string {
     return zone === 'reserved_card' ? `${zone}-${tier}-${slot}-${seat ?? 'P0'}` : `${zone}-${tier}-${slot}`;
+  }
+
+  function shouldAutoAnalyze(nextSnapshot: GameSnapshotDTO | null): boolean {
+    if (!nextSnapshot || !nextSnapshot.config?.analysis_mode) {
+      return false;
+    }
+    if (nextSnapshot.status !== 'IN_PROGRESS') {
+      return false;
+    }
+    return !(nextSnapshot.pending_reveals?.some((reveal) => isBlockingPendingReveal(reveal)) ?? false);
+  }
+
+  async function handleSnapshotUpdate(nextSnapshot: GameSnapshotDTO, engineShouldMove = false): Promise<void> {
+    setSnapshot(nextSnapshot);
+    setUiStatus(deriveUiStatus(nextSnapshot));
+    if (engineShouldMove || shouldAutoAnalyze(nextSnapshot)) {
+      await startEngineThink(searchSimulations);
+    }
   }
 
   function describePendingReveal(reason: GameSnapshotDTO['pending_reveals'][number]['reason']): string {
@@ -266,7 +279,7 @@ export function App() {
     const requested = customNumSimulations ?? searchSimulations;
     const fallback = snapshot?.config?.num_simulations ?? numSimulations;
     const nextNumSimulations =
-      Number.isInteger(requested) && requested >= 1 && requested <= 10000
+      Number.isInteger(requested) && requested >= 1
         ? requested
         : fallback;
     const think = await fetchJSON<EngineThinkResponse>('/api/game/engine-think', {
@@ -320,9 +333,7 @@ export function App() {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-      setSnapshot(nextSnapshot);
-      const status = deriveUiStatus(nextSnapshot);
-      setUiStatus(status);
+    await handleSnapshotUpdate(nextSnapshot);
   }
 
   async function onStartGame(event: FormEvent): Promise<void> {
@@ -335,7 +346,7 @@ export function App() {
     }
   }
 
-  function onOpenManualView(view: 'SETUP' | 'DEV'): void {
+  function onOpenManualView(view: 'SETUP' | 'ANALYSIS'): void {
     setError(null);
     clearPolling();
     setJobStatus(null);
@@ -343,10 +354,10 @@ export function App() {
     setHomeView(view);
   }
 
-  async function onStartManualGame(event: FormEvent, view: 'SETUP' | 'DEV'): Promise<void> {
+  async function onStartManualGame(event: FormEvent, view: 'SETUP' | 'ANALYSIS'): Promise<void> {
     event.preventDefault();
     try {
-      await startGame(true, oppositeSeat(setupEngineSeat), false);
+      await startGame(true, playerSeat, view === 'ANALYSIS');
       setHomeView(view);
     } catch (err) {
       setError((err as Error).message);
@@ -362,31 +373,7 @@ export function App() {
         method: 'POST',
         body: JSON.stringify({ action_idx: actionIdx }),
       });
-      setSnapshot(result.snapshot);
-      const nextStatus = deriveUiStatus(result.snapshot);
-      setUiStatus(nextStatus);
-      if (result.snapshot.status !== 'IN_PROGRESS') {
-        return;
-      }
-      if (result.engine_should_move) {
-        await startEngineThink(searchSimulations);
-      }
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  }
-
-  async function onApplyEngineMove(jobId: string): Promise<void> {
-    setError(null);
-    clearPolling();
-    try {
-      const nextSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/engine-apply', {
-        method: 'POST',
-        body: JSON.stringify({ job_id: jobId }),
-      });
-      setSnapshot(nextSnapshot);
-      setUiStatus(deriveUiStatus(nextSnapshot));
-      setJobStatus(null);
+      await handleSnapshotUpdate(result.snapshot, result.engine_should_move);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -401,8 +388,7 @@ export function App() {
         method: 'POST',
         body: '{}',
       });
-      setSnapshot(nextSnapshot);
-      setUiStatus(deriveUiStatus(nextSnapshot));
+      await handleSnapshotUpdate(nextSnapshot);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -417,8 +403,7 @@ export function App() {
         method: 'POST',
         body: '{}',
       });
-      setSnapshot(nextSnapshot);
-      setUiStatus(deriveUiStatus(nextSnapshot));
+      await handleSnapshotUpdate(nextSnapshot);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -440,17 +425,12 @@ export function App() {
         method: 'POST',
         body: JSON.stringify({ tier, slot, card_id: Number(selected) }),
       });
-      setSnapshot(result.snapshot);
       setRevealSelections((prev) => {
         const next = { ...prev };
         delete next[key];
         return next;
       });
-      const status = deriveUiStatus(result.snapshot);
-      setUiStatus(status);
-      if (result.engine_should_move) {
-        await startEngineThink(searchSimulations);
-      }
+      await handleSnapshotUpdate(result.snapshot, result.engine_should_move);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -472,17 +452,12 @@ export function App() {
         method: 'POST',
         body: JSON.stringify({ seat, slot, card_id: Number(selected) }),
       });
-      setSnapshot(result.snapshot);
       setRevealSelections((prev) => {
         const next = { ...prev };
         delete next[key];
         return next;
       });
-      const status = deriveUiStatus(result.snapshot);
-      setUiStatus(status);
-      if (result.engine_should_move) {
-        await startEngineThink(searchSimulations);
-      }
+      await handleSnapshotUpdate(result.snapshot, result.engine_should_move);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -504,17 +479,12 @@ export function App() {
         method: 'POST',
         body: JSON.stringify({ slot, noble_id: Number(selected) }),
       });
-      setSnapshot(result.snapshot);
       setRevealSelections((prev) => {
         const next = { ...prev };
         delete next[key];
         return next;
       });
-      const status = deriveUiStatus(result.snapshot);
-      setUiStatus(status);
-      if (result.engine_should_move) {
-        await startEngineThink(searchSimulations);
-      }
+      await handleSnapshotUpdate(result.snapshot, result.engine_should_move);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -527,14 +497,23 @@ export function App() {
       isSetupLikeView &&
       snapshot?.pending_reveals.some((reveal) => reveal.reason === 'initial_setup' || reveal.reason === 'initial_noble_setup') &&
       (zone === 'faceup_card' || zone === 'noble');
-    const boardCardEditable = zone === 'faceup_card' && snapshot?.config?.manual_reveal_mode;
-    if (!hasPending && !setupEditable && !boardCardEditable) {
+    const manualRevealEditable = Boolean(snapshot?.config?.manual_reveal_mode) && (zone === 'faceup_card' || zone === 'reserved_card' || zone === 'noble');
+    if (!hasPending && !setupEditable && !manualRevealEditable) {
       return;
     }
-    if ((setupEditable || boardCardEditable) && snapshot?.board_state) {
+    if ((setupEditable || manualRevealEditable) && snapshot?.board_state) {
       if (zone === 'faceup_card') {
         const row = snapshot.board_state.tiers.find((item) => item.tier === tier);
         const current = row?.cards.find((card) => card.slot === slot);
+        if (current && !current.is_placeholder) {
+          const cardId = findCatalogCardId(current);
+          if (cardId != null) {
+            setRevealSelections((prev) => ({ ...prev, [key]: String(cardId) }));
+          }
+        }
+      } else if (zone === 'reserved_card' && seat) {
+        const player = snapshot.board_state.players.find((item) => item.seat === seat);
+        const current = player?.reserved_public.find((card) => card.slot === slot);
         if (current && !current.is_placeholder) {
           const cardId = findCatalogCardId(current);
           if (cardId != null) {
@@ -555,14 +534,11 @@ export function App() {
   }
 
   const canStart = Boolean(selectedCheckpoint) && numSimulations > 0 && numSimulations <= 10000;
+  const isAnalysisSession = Boolean(snapshot?.config?.analysis_mode);
   const canMove =
     snapshot?.status === 'IN_PROGRESS' &&
-    snapshot.player_to_move === snapshot.config?.player_seat &&
-    !(snapshot.pending_reveals?.some((reveal) => isBlockingPendingReveal(reveal)) ?? false);
-  const isEngineTurn =
-    snapshot?.status === 'IN_PROGRESS' &&
-    snapshot.player_to_move !== snapshot.config?.player_seat;
-  const engineChosenActionIdx = jobStatus?.status === 'DONE' ? jobStatus.result?.action_idx ?? null : null;
+    !(snapshot.pending_reveals?.some((reveal) => isBlockingPendingReveal(reveal)) ?? false) &&
+    (isAnalysisSession || snapshot.player_to_move === snapshot.config?.player_seat);
   const activeReveal = useMemo(() => {
     if (!snapshot || !activeRevealKey) {
       return null;
@@ -598,6 +574,26 @@ export function App() {
         action_idx: null,
       };
     }
+    if (parsed && parsed.zone === 'reserved_card' && parsed.seat && snapshot.config?.manual_reveal_mode) {
+      return {
+        zone: parsed.zone,
+        tier: parsed.tier,
+        slot: parsed.slot,
+        actor: parsed.seat,
+        reason: 'reserved_from_deck' as const,
+        action_idx: null,
+      };
+    }
+    if (parsed && parsed.zone === 'noble' && snapshot.config?.manual_reveal_mode) {
+      return {
+        zone: parsed.zone,
+        tier: parsed.tier,
+        slot: parsed.slot,
+        actor: null,
+        reason: 'initial_noble_setup' as const,
+        action_idx: null,
+      };
+    }
     return null;
   }, [snapshot, activeRevealKey, isSetupLikeView]);
   const liveMctsTopAction = useMemo(() => {
@@ -628,6 +624,7 @@ export function App() {
           ...action,
           masked: false,
           policy_prob: 0,
+          q_value: null,
           is_selected: false,
           placement_hint: { zone: 'other' as const },
         },
@@ -793,7 +790,19 @@ export function App() {
       return ids;
     }
     if (activeReveal.zone === 'reserved_card' && activeReveal.actor) {
-      return new Set(snapshot.hidden_reserved_reveal_candidates[`${activeReveal.actor}:${activeReveal.slot}`] ?? []);
+      const ids = new Set(snapshot.hidden_reserved_reveal_candidates[`${activeReveal.actor}:${activeReveal.slot}`] ?? []);
+      for (const cardId of snapshot.hidden_deck_card_ids_by_tier[activeReveal.tier] ?? []) {
+        ids.add(cardId);
+      }
+      const player = displayBoard?.players.find((item) => item.seat === activeReveal.actor);
+      const current = player?.reserved_public.find((item) => item.slot === activeReveal.slot);
+      if (current && !current.is_placeholder) {
+        const id = findCatalogCardId(current);
+        if (id != null) {
+          ids.add(id);
+        }
+      }
+      return ids;
     }
     return new Set<number>();
   }, [activeReveal, snapshot, displayBoard, catalogCards]);
@@ -845,9 +854,9 @@ export function App() {
               <strong>Set Up</strong>
               <span>Start from placeholders and fill the opening board manually.</span>
             </button>
-            <button type="button" className="home-mode-card" onClick={() => onOpenManualView('DEV')}>
-              <strong>Dev</strong>
-              <span>Uses the same manual board-building flow as Set Up for now.</span>
+            <button type="button" className="home-mode-card" onClick={() => onOpenManualView('ANALYSIS')}>
+              <strong>Analysis</strong>
+              <span>Manual board setup with continuous engine analysis on every turn.</span>
             </button>
           </div>
         </section>
@@ -882,9 +891,9 @@ export function App() {
 
       {isSetupLikeView && !snapshot && (
         <section className="panel">
-          <h2>{homeView === 'DEV' ? 'Dev' : 'Set Up'}</h2>
+          <h2>{homeView === 'ANALYSIS' ? 'Analysis' : 'Set Up'}</h2>
           <p>Choose a checkpoint, then fill the opening cards and nobles manually.</p>
-          <form onSubmit={(event) => void onStartManualGame(event, homeView === 'DEV' ? 'DEV' : 'SETUP')} className="grid-form">
+          <form onSubmit={(event) => void onStartManualGame(event, homeView === 'ANALYSIS' ? 'ANALYSIS' : 'SETUP')} className="grid-form">
             <label>
               Checkpoint
               <select value={checkpointId} onChange={(event) => setCheckpointId(event.target.value)} disabled={checkpoints.length === 0}>
@@ -895,15 +904,8 @@ export function App() {
               ))}
               </select>
             </label>
-            <label>
-              Engine Player
-              <select value={setupEngineSeat} onChange={(event) => setSetupEngineSeat(event.target.value as Seat)}>
-                <option value="P0">P1</option>
-                <option value="P1">P2</option>
-              </select>
-            </label>
             <button type="submit" disabled={!canStart}>
-              {homeView === 'DEV' ? 'Start Dev' : 'Start Setup'}
+              {homeView === 'ANALYSIS' ? 'Start Analysis' : 'Start Setup'}
             </button>
           </form>
         </section>
@@ -945,12 +947,11 @@ export function App() {
                   <input
                     type="number"
                     min={1}
-                    max={10000}
                     value={searchSimulations}
                     onChange={(event) => setSearchSimulations(Number(event.target.value))}
                     aria-label="Search simulations"
                   />
-                  <button onClick={() => void startEngineThink(searchSimulations)} disabled={searchSimulations < 1 || searchSimulations > 10000}>
+                  <button onClick={() => void startEngineThink(searchSimulations)} disabled={searchSimulations < 1}>
                     Run Search
                   </button>
                 </div>
@@ -976,16 +977,13 @@ export function App() {
                     <tr>
                       <th>Action</th>
                       <th>MCTS</th>
+                      <th>Q</th>
                       <th>Model</th>
                     </tr>
                   </thead>
                   <tbody>
                     {pagedLiveRows.map(({ action, modelProb }) => {
-                      const canApplyEngineChoice =
-                        Boolean(isEngineTurn) &&
-                        jobStatus?.status === 'DONE' &&
-                        action.action_idx === engineChosenActionIdx;
-                      const rowClickable = canMove || canApplyEngineChoice;
+                      const rowClickable = canMove;
                       return (
                       <tr
                         key={`live-${action.action_idx}`}
@@ -993,10 +991,6 @@ export function App() {
                         onClick={() => {
                           if (canMove) {
                             void onPlayerMove(action.action_idx);
-                            return;
-                          }
-                          if (canApplyEngineChoice && jobStatus?.job_id) {
-                            void onApplyEngineMove(jobStatus.job_id);
                           }
                         }}
                         onKeyDown={(event) => {
@@ -1005,10 +999,6 @@ export function App() {
                             event.preventDefault();
                             if (canMove) {
                               void onPlayerMove(action.action_idx);
-                              return;
-                            }
-                            if (canApplyEngineChoice && jobStatus?.job_id) {
-                              void onApplyEngineMove(jobStatus.job_id);
                             }
                           }
                         }}
@@ -1020,6 +1010,9 @@ export function App() {
                         </td>
                         <td>
                           <span className="policy-value">{(action.policy_prob * 100).toFixed(2)}%</span>
+                        </td>
+                        <td>
+                          <span className="policy-value">{action.q_value != null ? action.q_value.toFixed(3) : '-'}</span>
                         </td>
                         <td>
                           <span className="policy-value">{(modelProb * 100).toFixed(2)}%</span>
