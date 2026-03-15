@@ -8,26 +8,7 @@
 namespace state_encoder {
 
 inline constexpr int ACTION_DIM = 69;
-inline constexpr int STATE_DIM = 252;
-inline constexpr int CARD_FEATURE_LEN = 11;
-
-inline constexpr int CP_TOKENS_START = 0;
-inline constexpr int CP_BONUSES_START = 6;
-inline constexpr int CP_POINTS_IDX = 11;
-inline constexpr int CP_RESERVED_START = 12;
-inline constexpr int OP_TOKENS_START = 45;
-inline constexpr int OP_BONUSES_START = 51;
-inline constexpr int OP_POINTS_IDX = 56;
-inline constexpr int PLAYER_INDEX_IDX = 57;
-inline constexpr int OPPONENT_RESERVED_SLOT_LEN = 13;
-inline constexpr int OPPONENT_RESERVED_CARD_LEN = 11;
-inline constexpr int OPPONENT_RESERVED_OCCUPIED_OFFSET = 11;
-inline constexpr int OPPONENT_RESERVED_TIER_OFFSET = 12;
-inline constexpr int OP_RESERVED_START = 58;
-inline constexpr int FACEUP_START = 97;
-inline constexpr int BANK_START = 229;
-inline constexpr int NOBLES_START = 235;
-inline constexpr int PHASE_FLAGS_START = 250;
+inline constexpr int STATE_DIM = 246;
 
 struct TerminalMetadata {
     bool is_terminal = false;

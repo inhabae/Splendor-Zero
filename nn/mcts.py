@@ -30,6 +30,7 @@ class MCTSConfig:
 class MCTSResult:
     chosen_action_idx: int
     visit_probs: np.ndarray  # (69,) float32
+    q_values: np.ndarray  # (69,) float32
     root_best_value: float
 
 
@@ -125,9 +126,13 @@ def run_mcts(
     visit_probs = np.asarray(native_result.visit_probs, dtype=np.float32)
     if visit_probs.shape != (ACTION_DIM,):
         raise RuntimeError(f"Unexpected native visit_probs shape {visit_probs.shape}")
+    q_values = np.asarray(native_result.q_values, dtype=np.float32)
+    if q_values.shape != (ACTION_DIM,):
+        raise RuntimeError(f"Unexpected native q_values shape {q_values.shape}")
 
     return MCTSResult(
         chosen_action_idx=int(native_result.chosen_action_idx),
         visit_probs=visit_probs,
+        q_values=q_values,
         root_best_value=float(native_result.root_best_value),
     )

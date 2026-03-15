@@ -293,12 +293,12 @@ void validate_public_state_consistency(const GameState& state) {
 
 constexpr int kActionDim = state_encoder::ACTION_DIM;
 constexpr int kStateDim = state_encoder::STATE_DIM;
-constexpr int kCardFeatureLen = state_encoder::CARD_FEATURE_LEN;
-constexpr int kCpTokensStart = state_encoder::CP_TOKENS_START;
-constexpr int kCpBonusesStart = state_encoder::CP_BONUSES_START;
-constexpr int kCpReservedStart = state_encoder::CP_RESERVED_START;
-constexpr int kFaceupStart = state_encoder::FACEUP_START;
-constexpr int kBankStart = state_encoder::BANK_START;
+constexpr int kCardFeatureLen = 11;
+constexpr int kCpTokensStart = 0;
+constexpr int kCpBonusesStart = 6;
+constexpr int kCpReservedStart = 12;
+constexpr int kFaceupStart = 91;
+constexpr int kBankStart = 223;
 
 constexpr std::array<std::array<int, 3>, 10> kTake3Triplets{{
     {{0, 1, 2}}, {{0, 1, 3}}, {{0, 1, 4}}, {{0, 2, 3}}, {{0, 2, 4}},
@@ -1241,25 +1241,6 @@ PYBIND11_MODULE(splendor_native, m) {
 
     m.attr("ACTION_DIM") = py::int_(kActionDim);
     m.attr("STATE_DIM") = py::int_(kStateDim);
-    py::dict state_layout;
-    state_layout["CARD_FEATURE_LEN"] = py::int_(state_encoder::CARD_FEATURE_LEN);
-    state_layout["CP_TOKENS_START"] = py::int_(state_encoder::CP_TOKENS_START);
-    state_layout["CP_BONUSES_START"] = py::int_(state_encoder::CP_BONUSES_START);
-    state_layout["CP_POINTS_IDX"] = py::int_(state_encoder::CP_POINTS_IDX);
-    state_layout["CP_RESERVED_START"] = py::int_(state_encoder::CP_RESERVED_START);
-    state_layout["OP_TOKENS_START"] = py::int_(state_encoder::OP_TOKENS_START);
-    state_layout["OP_BONUSES_START"] = py::int_(state_encoder::OP_BONUSES_START);
-    state_layout["OP_POINTS_IDX"] = py::int_(state_encoder::OP_POINTS_IDX);
-    state_layout["PLAYER_INDEX_IDX"] = py::int_(state_encoder::PLAYER_INDEX_IDX);
-    state_layout["OPPONENT_RESERVED_SLOT_LEN"] = py::int_(state_encoder::OPPONENT_RESERVED_SLOT_LEN);
-    state_layout["OP_RESERVED_START"] = py::int_(state_encoder::OP_RESERVED_START);
-    state_layout["OP_RESERVED_IS_OCCUPIED_OFFSET"] = py::int_(state_encoder::OPPONENT_RESERVED_OCCUPIED_OFFSET);
-    state_layout["OP_RESERVED_TIER_OFFSET"] = py::int_(state_encoder::OPPONENT_RESERVED_TIER_OFFSET);
-    state_layout["FACEUP_START"] = py::int_(state_encoder::FACEUP_START);
-    state_layout["BANK_START"] = py::int_(state_encoder::BANK_START);
-    state_layout["NOBLES_START"] = py::int_(state_encoder::NOBLES_START);
-    state_layout["PHASE_FLAGS_START"] = py::int_(state_encoder::PHASE_FLAGS_START);
-    m.attr("STATE_LAYOUT") = std::move(state_layout);
     m.attr("BUILD_TYPE") = py::str(SPLENDOR_BUILD_TYPE);
     m.attr("BUILD_OPTIMIZED") = py::bool_(SPLENDOR_BUILD_OPTIMIZED != 0);
     m.def("list_standard_cards", &list_standard_cards_py);
@@ -1274,6 +1255,7 @@ PYBIND11_MODULE(splendor_native, m) {
 
     py::class_<NativeMCTSResult>(m, "NativeMCTSResult")
         .def_property_readonly("visit_probs", &NativeMCTSResult::visit_probs_array)
+        .def_property_readonly("q_values", &NativeMCTSResult::q_values_array)
         .def_readonly("chosen_action_idx", &NativeMCTSResult::chosen_action_idx)
         .def_readonly("root_best_value", &NativeMCTSResult::root_best_value);
 
