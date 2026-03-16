@@ -8,7 +8,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any
 
-from .checkpoints import LegacyCheckpointAdapter, load_model_from_spec
+from .checkpoints import load_model_from_spec
 from .native_env import SplendorNativeEnv
 from .opponents import CheckpointMCTSOpponent, GreedyHeuristicOpponent, ModelMCTSOpponent, RandomOpponent
 
@@ -333,7 +333,8 @@ def _policy_to_spec(policy: Any) -> dict[str, Any]:
         if not hasattr(model, "export_model_kwargs"):
             raise TypeError(f"ModelMCTSOpponent model does not expose export_model_kwargs(): {type(model)}")
         compat_adapter = getattr(model, "compat_adapter", None)
-        raw_state_dict = model.base_model.state_dict() if isinstance(model, LegacyCheckpointAdapter) else model.state_dict()
+        base_model = getattr(model, "base_model", None)
+        raw_state_dict = base_model.state_dict() if base_model is not None else model.state_dict()
         # Convert params to CPU tensors for process-safe transport.
         model_state_dict = {}
         for key, tensor in raw_state_dict.items():
