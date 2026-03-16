@@ -728,16 +728,16 @@ NativeMCTSResult run_native_mcts(
         }
     };
 
-    auto apply_ready_backup_serial = [&](ReadyBackup& ready) {
-        float value = ready.value;
-        for (auto it = ready.path.rbegin(); it != ready.path.rend(); ++it) {
-            const float backed = it->same_player ? value : -value;
-            MCTSNode& parent = nodes[static_cast<std::size_t>(it->node_index)];
-            parent.visit_count[static_cast<std::size_t>(it->action)] += 1;
-            parent.value_sum[static_cast<std::size_t>(it->action)] += backed;
-            value = backed;
-        }
-    };
+    // auto apply_ready_backup_serial = [&](ReadyBackup& ready) {
+    //     float value = ready.value;
+    //     for (auto it = ready.path.rbegin(); it != ready.path.rend(); ++it) {
+    //         const float backed = it->same_player ? value : -value;
+    //         MCTSNode& parent = nodes[static_cast<std::size_t>(it->node_index)];
+    //         parent.visit_count[static_cast<std::size_t>(it->action)] += 1;
+    //         parent.value_sum[static_cast<std::size_t>(it->action)] += backed;
+    //         value = backed;
+    //     }
+    // };
 
     auto apply_ready_backup_virtual = [&](ReadyBackup& ready) {
         float value = ready.value;
@@ -775,8 +775,13 @@ NativeMCTSResult run_native_mcts(
     std::vector<ReadyBackup> backups;
     backups.reserve(static_cast<std::size_t>(eval_batch_size));
 
+    int total_slots_requested = 0;
+    int total_slots_drop_pending_eval = 0;
+    int total_slots_drop_no_action = 0;
+
     while (completed < num_simulations) {
         const int target_batch = std::min(eval_batch_size, num_simulations - completed);
+        total_slots_requested += target_batch;
         pending.clear();
         backups.clear();
         if (pending.capacity() < static_cast<std::size_t>(target_batch)) {
@@ -812,6 +817,7 @@ NativeMCTSResult run_native_mcts(
                     if (!node.expanded) {
                         if (node.pending_eval) {
                             rollback_virtual_path(path);
+                            total_slots_drop_pending_eval += 1;
                             break;
                         }
                         node.pending_eval = true;
@@ -837,6 +843,7 @@ NativeMCTSResult run_native_mcts(
                     );
                     if (action < 0) {
                         rollback_virtual_path(path);
+                        total_slots_drop_no_action += 1;
                         break;
                     }
 
@@ -870,6 +877,8 @@ NativeMCTSResult run_native_mcts(
             std::exception_ptr first_exc = nullptr;
             std::mutex exc_mutex;
             std::mutex merge_mutex;
+            std::atomic<int> batch_drop_pending_eval(0);
+            std::atomic<int> batch_drop_no_action(0);
 
             auto worker = [&]() {
                 std::vector<PendingLeafEval> local_pending;
@@ -913,6 +922,7 @@ NativeMCTSResult run_native_mcts(
                                     if (node.pending_eval) {
                                         // Another traversal already owns this leaf eval; cancel temporary virtual loss.
                                         rollback_virtual_path(path);
+                                        batch_drop_pending_eval.fetch_add(1, std::memory_order_relaxed);
                                         break;
                                     }
                                     node.pending_eval = true;
@@ -941,6 +951,7 @@ NativeMCTSResult run_native_mcts(
                                 );
                                 if (action < 0) {
                                     rollback_virtual_path(path);
+                                    batch_drop_no_action.fetch_add(1, std::memory_order_relaxed);
                                     break;
                                 }
 
@@ -1003,6 +1014,9 @@ NativeMCTSResult run_native_mcts(
             if (first_exc) {
                 std::rethrow_exception(first_exc);
             }
+
+            total_slots_drop_pending_eval += batch_drop_pending_eval.load(std::memory_order_relaxed);
+            total_slots_drop_no_action += batch_drop_no_action.load(std::memory_order_relaxed);
         }
 
         evaluate_pending(pending, backups);
@@ -1021,6 +1035,10 @@ NativeMCTSResult run_native_mcts(
 
     const MCTSNode& root = nodes[0];
     NativeMCTSResult result;
+    result.search_slots_requested = total_slots_requested;
+    result.search_slots_evaluated = completed - 1; // subtract 1 for the pre-expanded root
+    result.search_slots_drop_pending_eval = total_slots_drop_pending_eval;
+    result.search_slots_drop_no_action = total_slots_drop_no_action;
     const auto raw_visit_probs = visit_probs_from_counts(root, root_data.mask);
     result.chosen_action_idx = sample_action_from_visits(
         raw_visit_probs, root_data.mask, turns_taken, temperature_moves, temperature, rng

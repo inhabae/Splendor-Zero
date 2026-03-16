@@ -154,6 +154,14 @@ def run_selfplay_session(
     cutoff_episodes = 0
     total_turns = 0
     replay_games_added = 0
+    mcts_sum_search_seconds = 0.0
+    mcts_sum_root_entropy = 0.0
+    mcts_sum_root_top1_prob = 0.0
+    mcts_sum_selected_visit_prob = 0.0
+    mcts_search_slots_requested = 0
+    mcts_search_slots_evaluated = 0
+    mcts_search_slots_drop_pending_eval = 0
+    mcts_search_slots_drop_no_action = 0
     for episode_idx in range(games):
         seed = int(seed_base + episode_idx)
         rng = random.Random(seed)
@@ -184,6 +192,7 @@ def run_selfplay_session(
                 full_search_actions += 1
             else:
                 fast_search_actions += 1
+            t0_mcts = time.perf_counter()
             mcts_result = run_mcts(
                 env,
                 model,
@@ -193,6 +202,7 @@ def run_selfplay_session(
                 config=active_config,
                 rng=rng,
             )
+            mcts_sum_search_seconds += time.perf_counter() - t0_mcts
 
             action = int(mcts_result.chosen_action_idx)
             policy = np.asarray(mcts_result.visit_probs, dtype=np.float32)
@@ -200,6 +210,16 @@ def run_selfplay_session(
                 raise RuntimeError(f"Unexpected visit_probs shape {policy.shape}")
             if not bool(state.mask[action]):
                 raise RuntimeError(f"MCTS produced illegal action {action}")
+
+            p_safe = np.maximum(policy, 1e-12)
+            p_safe = p_safe / np.sum(p_safe)
+            mcts_sum_root_entropy += float(-np.sum(p_safe * np.log(p_safe)))
+            mcts_sum_root_top1_prob += float(np.max(policy))
+            mcts_sum_selected_visit_prob += float(policy[action])
+            mcts_search_slots_requested += int(mcts_result.search_slots_requested)
+            mcts_search_slots_evaluated += int(mcts_result.search_slots_evaluated)
+            mcts_search_slots_drop_pending_eval += int(getattr(mcts_result, "search_slots_drop_pending_eval", 0))
+            mcts_search_slots_drop_no_action += int(getattr(mcts_result, "search_slots_drop_no_action", 0))
 
             if is_full_search:
                 root_best_value = float(mcts_result.root_best_value)
@@ -270,6 +290,14 @@ def run_selfplay_session(
         "terminal_episodes": int(terminal_episodes),
         "cutoff_episodes": int(cutoff_episodes),
         "total_turns": int(total_turns),
+        "mcts_sum_search_seconds": float(mcts_sum_search_seconds),
+        "mcts_sum_root_entropy": float(mcts_sum_root_entropy),
+        "mcts_sum_root_top1_prob": float(mcts_sum_root_top1_prob),
+        "mcts_sum_selected_visit_prob": float(mcts_sum_selected_visit_prob),
+        "mcts_search_slots_requested": int(mcts_search_slots_requested),
+        "mcts_search_slots_evaluated": int(mcts_search_slots_evaluated),
+        "mcts_search_slots_drop_pending_eval": int(mcts_search_slots_drop_pending_eval),
+        "mcts_search_slots_drop_no_action": int(mcts_search_slots_drop_no_action),
         "use_forced_playouts": bool(use_forced_playouts),
         "k": float(forced_playouts_k),
         "forced_playouts_k": float(forced_playouts_k),
@@ -728,6 +756,14 @@ def _run_selfplay_session_parallel_impl(
     terminal_episodes = 0
     cutoff_episodes = 0
     total_turns = 0
+    mcts_sum_search_seconds = 0.0
+    mcts_sum_root_entropy = 0.0
+    mcts_sum_root_top1_prob = 0.0
+    mcts_sum_selected_visit_prob = 0.0
+    mcts_search_slots_requested = 0
+    mcts_search_slots_evaluated = 0
+    mcts_search_slots_drop_pending_eval = 0
+    mcts_search_slots_drop_no_action = 0
     for payload in by_worker_idx.values():
         session_metadata = payload.get("session_metadata")
         if not isinstance(session_metadata, dict):
@@ -740,6 +776,14 @@ def _run_selfplay_session_parallel_impl(
         terminal_episodes += int(session_metadata.get("terminal_episodes", 0))
         cutoff_episodes += int(session_metadata.get("cutoff_episodes", 0))
         total_turns += int(session_metadata.get("total_turns", 0))
+        mcts_sum_search_seconds += float(session_metadata.get("mcts_sum_search_seconds", 0.0))
+        mcts_sum_root_entropy += float(session_metadata.get("mcts_sum_root_entropy", 0.0))
+        mcts_sum_root_top1_prob += float(session_metadata.get("mcts_sum_root_top1_prob", 0.0))
+        mcts_sum_selected_visit_prob += float(session_metadata.get("mcts_sum_selected_visit_prob", 0.0))
+        mcts_search_slots_requested += int(session_metadata.get("mcts_search_slots_requested", 0))
+        mcts_search_slots_evaluated += int(session_metadata.get("mcts_search_slots_evaluated", 0))
+        mcts_search_slots_drop_pending_eval += int(session_metadata.get("mcts_search_slots_drop_pending_eval", 0))
+        mcts_search_slots_drop_no_action += int(session_metadata.get("mcts_search_slots_drop_no_action", 0))
 
     metadata = {
         "session_id": session_id,
@@ -759,8 +803,15 @@ def _run_selfplay_session_parallel_impl(
         "terminal_episodes": int(terminal_episodes),
         "cutoff_episodes": int(cutoff_episodes),
         "total_turns": int(total_turns),
+        "mcts_sum_search_seconds": float(mcts_sum_search_seconds),
+        "mcts_sum_root_entropy": float(mcts_sum_root_entropy),
+        "mcts_sum_root_top1_prob": float(mcts_sum_root_top1_prob),
+        "mcts_sum_selected_visit_prob": float(mcts_sum_selected_visit_prob),
+        "mcts_search_slots_requested": int(mcts_search_slots_requested),
+        "mcts_search_slots_evaluated": int(mcts_search_slots_evaluated),
+        "mcts_search_slots_drop_pending_eval": int(mcts_search_slots_drop_pending_eval),
+        "mcts_search_slots_drop_no_action": int(mcts_search_slots_drop_no_action),
         "use_forced_playouts": bool(use_forced_playouts),
-        "k": float(forced_playouts_k),
         "forced_playouts_k": float(forced_playouts_k),
         "seed_base": int(seed_base),
         "workers_requested": int(workers),

@@ -32,7 +32,10 @@ class MCTSResult:
     visit_probs: np.ndarray  # (69,) float32
     q_values: np.ndarray  # (69,) float32
     root_best_value: float
-
+    search_slots_requested: int
+    search_slots_evaluated: int
+    search_slots_drop_pending_eval: int
+    search_slots_drop_no_action: int
 
 def run_mcts(
     env: Any,
@@ -135,4 +138,8 @@ def run_mcts(
         visit_probs=visit_probs,
         q_values=q_values,
         root_best_value=float(native_result.root_best_value),
+        search_slots_requested=int(native_result.search_slots_requested),
+        search_slots_evaluated=int(native_result.search_slots_evaluated),
+        search_slots_drop_pending_eval=int(getattr(native_result, "search_slots_drop_pending_eval", 0)),
+        search_slots_drop_no_action=int(getattr(native_result, "search_slots_drop_no_action", 0)),
     )

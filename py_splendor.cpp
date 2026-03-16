@@ -1257,7 +1257,11 @@ PYBIND11_MODULE(splendor_native, m) {
         .def_property_readonly("visit_probs", &NativeMCTSResult::visit_probs_array)
         .def_property_readonly("q_values", &NativeMCTSResult::q_values_array)
         .def_readonly("chosen_action_idx", &NativeMCTSResult::chosen_action_idx)
-        .def_readonly("root_best_value", &NativeMCTSResult::root_best_value);
+        .def_readonly("root_best_value", &NativeMCTSResult::root_best_value)
+        .def_readonly("search_slots_requested", &NativeMCTSResult::search_slots_requested)
+        .def_readonly("search_slots_evaluated", &NativeMCTSResult::search_slots_evaluated)
+        .def_readonly("search_slots_drop_pending_eval", &NativeMCTSResult::search_slots_drop_pending_eval)
+        .def_readonly("search_slots_drop_no_action", &NativeMCTSResult::search_slots_drop_no_action);
 
     py::class_<NativeEnv>(m, "NativeEnv")
         .def(py::init<>())

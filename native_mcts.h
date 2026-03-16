@@ -13,6 +13,10 @@ struct NativeMCTSResult {
     std::array<float, 69> visit_probs{};
     std::array<float, 69> q_values{};
     float root_best_value = 0.0f;
+    int search_slots_requested = 0;
+    int search_slots_evaluated = 0;
+    int search_slots_drop_pending_eval = 0;
+    int search_slots_drop_no_action = 0;
 
     pybind11::array_t<float> visit_probs_array() const;
     pybind11::array_t<float> q_values_array() const;

@@ -145,6 +145,10 @@ class CollectorStats:
     mcts_sum_root_entropy: float = 0.0
     mcts_sum_root_top1_prob: float = 0.0
     mcts_sum_selected_visit_prob: float = 0.0
+    mcts_search_slots_requested: int = 0
+    mcts_search_slots_evaluated: int = 0
+    mcts_search_slots_drop_pending_eval: int = 0
+    mcts_search_slots_drop_no_action: int = 0
 
 
 def _policy_entropy(policy: np.ndarray, mask: np.ndarray) -> float:
@@ -555,6 +559,14 @@ def collect_episode(
                 legal_probs = policy_target[state.mask]
                 collector_stats.mcts_sum_root_top1_prob += float(np.max(legal_probs)) if legal_probs.size > 0 else 0.0
                 collector_stats.mcts_sum_selected_visit_prob += float(policy_target[action])
+                collector_stats.mcts_search_slots_requested += int(mcts_result.search_slots_requested)
+                collector_stats.mcts_search_slots_evaluated += int(mcts_result.search_slots_evaluated)
+                collector_stats.mcts_search_slots_drop_pending_eval += int(
+                    getattr(mcts_result, "search_slots_drop_pending_eval", 0)
+                )
+                collector_stats.mcts_search_slots_drop_no_action += int(
+                    getattr(mcts_result, "search_slots_drop_no_action", 0)
+                )
             else:
                 collector_stats.mcts_fast_search_actions += 1
         if not bool(state.mask[action]):
@@ -696,6 +708,10 @@ def _collect_replay(
         "mcts_avg_root_entropy": (collector_stats.mcts_sum_root_entropy / mcts_n) if has_mcts else 0.0,
         "mcts_avg_root_top1_visit_prob": (collector_stats.mcts_sum_root_top1_prob / mcts_n) if has_mcts else 0.0,
         "mcts_avg_selected_visit_prob": (collector_stats.mcts_sum_selected_visit_prob / mcts_n) if has_mcts else 0.0,
+        "mcts_search_slots_requested": int(collector_stats.mcts_search_slots_requested),
+        "mcts_search_slots_evaluated": int(collector_stats.mcts_search_slots_evaluated),
+        "mcts_search_slots_drop_pending_eval": int(collector_stats.mcts_search_slots_drop_pending_eval),
+        "mcts_search_slots_drop_no_action": int(collector_stats.mcts_search_slots_drop_no_action),
         "collector_pcr_enabled": float(1.0 if pcr_enabled else 0.0),
         "collector_full_search_sims": float(resolved_full_search_sims),
         "collector_fast_search_sims": float(resolved_fast_search_sims),
@@ -836,11 +852,14 @@ def _collect_replay_parallel_mcts(
         "collector_mcts_total_actions": float(session_metadata.get("total_actions", total_steps)),
         "collector_mcts_full_search_actions": float(session_metadata.get("full_search_actions", total_steps)),
         "collector_mcts_fast_search_actions": float(session_metadata.get("fast_search_actions", 0.0)),
-        # Per-action search timing/root diagnostics are not emitted by the parallel worker API.
-        "mcts_avg_search_ms": 0.0,
-        "mcts_avg_root_entropy": 0.0,
-        "mcts_avg_root_top1_visit_prob": 0.0,
-        "mcts_avg_selected_visit_prob": 0.0,
+        "mcts_avg_search_ms": (1000.0 * float(session_metadata.get("mcts_sum_search_seconds", 0.0)) / total_steps) if total_steps > 0 else 0.0,
+        "mcts_avg_root_entropy": (float(session_metadata.get("mcts_sum_root_entropy", 0.0)) / total_steps) if total_steps > 0 else 0.0,
+        "mcts_avg_root_top1_visit_prob": (float(session_metadata.get("mcts_sum_root_top1_prob", 0.0)) / total_steps) if total_steps > 0 else 0.0,
+        "mcts_avg_selected_visit_prob": (float(session_metadata.get("mcts_sum_selected_visit_prob", 0.0)) / total_steps) if total_steps > 0 else 0.0,
+        "mcts_search_slots_requested": int(session_metadata.get("mcts_search_slots_requested", 0)),
+        "mcts_search_slots_evaluated": int(session_metadata.get("mcts_search_slots_evaluated", 0)),
+        "mcts_search_slots_drop_pending_eval": int(session_metadata.get("mcts_search_slots_drop_pending_eval", 0)),
+        "mcts_search_slots_drop_no_action": int(session_metadata.get("mcts_search_slots_drop_no_action", 0)),
         "collector_pcr_enabled": float(1.0 if session_metadata.get("playout_cap_randomization_enabled", False) else 0.0),
         "collector_full_search_sims": float(session_metadata.get("full_search_sims", mcts_config.num_simulations)),
         "collector_fast_search_sims": float(session_metadata.get("fast_search_sims", mcts_config.num_simulations)),
@@ -1240,6 +1259,10 @@ def run_smoke(
             "mcts_avg_root_entropy": collection_metrics["mcts_avg_root_entropy"],
             "mcts_avg_root_top1_visit_prob": collection_metrics["mcts_avg_root_top1_visit_prob"],
             "mcts_avg_selected_visit_prob": collection_metrics["mcts_avg_selected_visit_prob"],
+            "mcts_search_slots_requested": collection_metrics["mcts_search_slots_requested"],
+            "mcts_search_slots_evaluated": collection_metrics["mcts_search_slots_evaluated"],
+            "mcts_search_slots_drop_pending_eval": collection_metrics["mcts_search_slots_drop_pending_eval"],
+            "mcts_search_slots_drop_no_action": collection_metrics["mcts_search_slots_drop_no_action"],
             "episodes": collection_metrics["episodes"],
             "terminal_episodes": collection_metrics["terminal_episodes"],
             "cutoff_episodes": collection_metrics["cutoff_episodes"],
@@ -1470,6 +1493,10 @@ def run_cycles(
     weighted_sum_mcts_avg_root_entropy = 0.0
     weighted_sum_mcts_avg_root_top1_visit_prob = 0.0
     weighted_sum_mcts_avg_selected_visit_prob = 0.0
+    total_mcts_search_slots_requested = 0.0
+    total_mcts_search_slots_evaluated = 0.0
+    total_mcts_search_slots_drop_pending_eval = 0.0
+    total_mcts_search_slots_drop_no_action = 0.0
     total_train_steps = 0.0
     weighted_sum_avg_policy_loss = 0.0
     weighted_sum_avg_value_loss = 0.0
@@ -1749,12 +1776,22 @@ def run_cycles(
                 f"eval_total_loss={eval_metrics['eval_total_loss']:.8f}"
             )
             if float(collection_metrics["collector_mcts_actions"]) > 0:
+                slots_req = float(collection_metrics.get("mcts_search_slots_requested", 0.0))
+                slots_eval = float(collection_metrics.get("mcts_search_slots_evaluated", 0.0))
+                slots_drop_pending = float(collection_metrics.get("mcts_search_slots_drop_pending_eval", 0.0))
+                slots_drop_no_action = float(collection_metrics.get("mcts_search_slots_drop_no_action", 0.0))
+                slots_success_rate = (slots_eval / slots_req) if slots_req > 0 else 0.0
+                slots_drop_pending_rate = (slots_drop_pending / slots_req) if slots_req > 0 else 0.0
+                slots_drop_no_action_rate = (slots_drop_no_action / slots_req) if slots_req > 0 else 0.0
                 print(
                     f"cycle_mcts={cycle_idx}/{cycles} "
                     f"avg_search_ms={float(collection_metrics.get('mcts_avg_search_ms', 0.0)):.3f} "
                     f"avg_root_entropy={float(collection_metrics.get('mcts_avg_root_entropy', 0.0)):.4f} "
                     f"avg_root_top1={float(collection_metrics.get('mcts_avg_root_top1_visit_prob', 0.0)):.4f} "
-                    f"avg_selected_visit={float(collection_metrics.get('mcts_avg_selected_visit_prob', 0.0)):.4f}"
+                    f"avg_selected_visit={float(collection_metrics.get('mcts_avg_selected_visit_prob', 0.0)):.4f} "
+                    f"batch_success_rate={slots_success_rate:.3f} "
+                    f"drop_pending_eval_rate={slots_drop_pending_rate:.3f} "
+                    f"drop_no_action_rate={slots_drop_no_action_rate:.3f}"
                 )
 
             checkpoint_metadata = {
@@ -2039,6 +2076,14 @@ def run_cycles(
                 weighted_sum_mcts_avg_root_entropy += float(collection_metrics.get("mcts_avg_root_entropy", 0.0)) * cycle_mcts_actions
                 weighted_sum_mcts_avg_root_top1_visit_prob += float(collection_metrics.get("mcts_avg_root_top1_visit_prob", 0.0)) * cycle_mcts_actions
                 weighted_sum_mcts_avg_selected_visit_prob += float(collection_metrics.get("mcts_avg_selected_visit_prob", 0.0)) * cycle_mcts_actions
+                total_mcts_search_slots_requested += float(collection_metrics.get("mcts_search_slots_requested", 0.0))
+                total_mcts_search_slots_evaluated += float(collection_metrics.get("mcts_search_slots_evaluated", 0.0))
+                total_mcts_search_slots_drop_pending_eval += float(
+                    collection_metrics.get("mcts_search_slots_drop_pending_eval", 0.0)
+                )
+                total_mcts_search_slots_drop_no_action += float(
+                    collection_metrics.get("mcts_search_slots_drop_no_action", 0.0)
+                )
             cycle_train_steps = float(train_metrics["train_steps"])
             total_train_steps += cycle_train_steps
             weighted_sum_avg_policy_loss += float(train_metrics["avg_policy_loss"]) * cycle_train_steps
@@ -2225,6 +2270,10 @@ def run_cycles(
         "mcts_avg_root_entropy": (weighted_sum_mcts_avg_root_entropy / total_mcts_actions) if total_mcts_actions > 0 else 0.0,
         "mcts_avg_root_top1_visit_prob": (weighted_sum_mcts_avg_root_top1_visit_prob / total_mcts_actions) if total_mcts_actions > 0 else 0.0,
         "mcts_avg_selected_visit_prob": (weighted_sum_mcts_avg_selected_visit_prob / total_mcts_actions) if total_mcts_actions > 0 else 0.0,
+        "mcts_search_slots_requested_total": total_mcts_search_slots_requested,
+        "mcts_search_slots_evaluated_total": total_mcts_search_slots_evaluated,
+        "mcts_search_slots_drop_pending_eval_total": total_mcts_search_slots_drop_pending_eval,
+        "mcts_search_slots_drop_no_action_total": total_mcts_search_slots_drop_no_action,
         "avg_policy_loss": weighted_sum_avg_policy_loss / total_train_steps,
         "avg_value_loss": weighted_sum_avg_value_loss / total_train_steps,
         "avg_total_loss": weighted_sum_avg_total_loss / total_train_steps,
