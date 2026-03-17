@@ -92,6 +92,7 @@ export function App() {
 
   const pollRef = useRef<number | null>(null);
   const livePollRef = useRef<number | null>(null);
+  const activeJobIdRef = useRef<string | null>(null);
   const loadInputRef = useRef<HTMLInputElement | null>(null);
   const isSetupLikeView = homeView === 'SETUP' || homeView === 'ANALYSIS';
   const lastLiveSaveUpdatedAtRef = useRef<string | null>(null);
@@ -204,6 +205,7 @@ export function App() {
       window.clearInterval(pollRef.current);
       pollRef.current = null;
     }
+    activeJobIdRef.current = null;
   }
 
   function clearLivePolling(): void {
@@ -250,6 +252,8 @@ export function App() {
   }
 
   async function handleSnapshotUpdate(nextSnapshot: GameSnapshotDTO, engineShouldMove = false): Promise<void> {
+    clearPolling();
+    setJobStatus(null);
     setSnapshot(nextSnapshot);
     setUiStatus(deriveUiStatus(nextSnapshot));
     const nextAutoAnalyzeKey = autoAnalyzeKey(nextSnapshot);
@@ -331,6 +335,7 @@ export function App() {
     });
     setUiStatus('WAITING_ENGINE');
     clearPolling();
+    activeJobIdRef.current = think.job_id;
 
     pollRef.current = window.setInterval(() => {
       void pollEngineJob(think.job_id);
@@ -340,6 +345,9 @@ export function App() {
   async function pollEngineJob(nextJobId: string): Promise<void> {
     try {
       const status = await fetchJSON<EngineJobStatusDTO>(`/api/game/engine-job/${nextJobId}`);
+      if (activeJobIdRef.current !== nextJobId) {
+        return;
+      }
       setJobStatus(status);
       if (status.status === 'DONE') {
         clearPolling();
@@ -971,6 +979,8 @@ export function App() {
         if (status.updated_at === lastLiveSaveUpdatedAtRef.current) {
           return;
         }
+        clearPolling();
+        setJobStatus(null);
         const nextSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/live-save/load', {
           method: 'POST',
           body: '{}',
