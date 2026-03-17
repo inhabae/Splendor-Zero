@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .checkpoints import load_checkpoint
+from .ismcts import ISMCTSConfig, run_ismcts
 from .mcts import MCTSConfig, run_mcts
 from .native_env import SplendorNativeEnv, StepState, list_standard_cards, list_standard_nobles
 from .selfplay_dataset import (
@@ -215,6 +216,7 @@ class EngineApplyRequest(BaseModel):
 
 class EngineThinkRequest(BaseModel):
     num_simulations: int | None = Field(default=None, ge=1)
+    search_type: Literal["mcts", "ismcts"] = "mcts"
 
 
 class RevealCardRequest(BaseModel):
@@ -1334,6 +1336,7 @@ class GameManager:
 
             model = self._get_model_locked(config)
             num_simulations = int(req.num_simulations) if req is not None and req.num_simulations is not None else config.num_simulations
+            search_type = str(req.search_type) if req is not None else "mcts"
             turns_taken = len(self._move_log)
 
             def _run() -> int:
@@ -1347,21 +1350,35 @@ class GameManager:
                     cur_job.status = "RUNNING"
 
                 try:
-                    result = run_mcts(
-                        env,
-                        model,
-                        state=step,
-                        turns_taken=turns_taken,
-                        device="cpu",
-                        config=MCTSConfig(
-                            num_simulations=num_simulations,
-                            c_puct=1.25,
-                            temperature_moves=0,
-                            temperature=0.0,
-                            root_dirichlet_noise=False,
-                        ),
-                        rng=self._rng,
-                    )
+                    if search_type == "ismcts":
+                        result = run_ismcts(
+                            env,
+                            model,
+                            state=step,
+                            turns_taken=turns_taken,
+                            device="cpu",
+                            config=ISMCTSConfig(
+                                num_simulations=num_simulations,
+                                c_puct=1.25,
+                            ),
+                            rng=self._rng,
+                        )
+                    else:
+                        result = run_mcts(
+                            env,
+                            model,
+                            state=step,
+                            turns_taken=turns_taken,
+                            device="cpu",
+                            config=MCTSConfig(
+                                num_simulations=num_simulations,
+                                c_puct=1.25,
+                                temperature_moves=0,
+                                temperature=0.0,
+                                root_dirichlet_noise=False,
+                            ),
+                            rng=self._rng,
+                        )
                     with self._lock:
                         cur_job = self._jobs.get(job.job_id)
                         if cur_job is None:
