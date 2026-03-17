@@ -22,6 +22,16 @@ export interface MoveLogEntryDTO {
   label: string;
 }
 
+export interface GameEventDTO {
+  kind: 'move' | 'reveal_card' | 'reveal_reserved_card' | 'reveal_noble' | 'resign';
+  actor?: Seat | null;
+  action_idx?: number | null;
+  tier?: number | null;
+  slot?: number | null;
+  card_id?: number | null;
+  noble_id?: number | null;
+}
+
 export interface GameConfigDTO {
   checkpoint_id: string;
   checkpoint_path: string;
@@ -113,6 +123,21 @@ export interface GameSnapshotDTO {
   hidden_reserved_reveal_candidates: Record<string, number[]>;
   can_undo: boolean;
   can_redo: boolean;
+}
+
+export interface SavedGameDTO {
+  version: number;
+  saved_at: string;
+  game_id: string;
+  config: GameConfigDTO;
+  exported_state: Record<string, unknown>;
+  move_log: MoveLogEntryDTO[];
+  setup_event_log: GameEventDTO[];
+  event_log: GameEventDTO[];
+  redo_log: GameEventDTO[];
+  pending_reveals: PendingRevealDTO[];
+  forced_winner?: number | null;
+  rng_state?: unknown;
 }
 
 export interface EngineThinkResponse {

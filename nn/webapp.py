@@ -273,6 +273,31 @@ class PendingRevealDTO(BaseModel):
     action_idx: int | None = None
 
 
+class GameEventDTO(BaseModel):
+    kind: Literal["move", "reveal_card", "reveal_reserved_card", "reveal_noble", "resign"]
+    actor: Literal["P0", "P1"] | None = None
+    action_idx: int | None = None
+    tier: int | None = None
+    slot: int | None = None
+    card_id: int | None = None
+    noble_id: int | None = None
+
+
+class SavedGameDTO(BaseModel):
+    version: int = 1
+    saved_at: str
+    game_id: str
+    config: GameConfigDTO
+    exported_state: dict[str, Any]
+    move_log: list[MoveLogEntryDTO]
+    setup_event_log: list[GameEventDTO]
+    event_log: list[GameEventDTO]
+    redo_log: list[GameEventDTO]
+    pending_reveals: list[PendingRevealDTO]
+    forced_winner: int | None = None
+    rng_state: Any | None = None
+
+
 class CatalogCardDTO(BaseModel):
     id: int
     tier: int
@@ -672,6 +697,44 @@ def _mask_to_actions(mask: np.ndarray) -> list[int]:
     return [int(v) for v in np.flatnonzero(mask)]
 
 
+def _json_safe_random_state(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_json_safe_random_state(item) for item in value]
+    if isinstance(value, list):
+        return [_json_safe_random_state(item) for item in value]
+    return value
+
+
+def _random_state_from_json(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(_random_state_from_json(item) for item in value)
+    return value
+
+
+def _game_event_to_dto(event: GameEvent) -> GameEventDTO:
+    return GameEventDTO(
+        kind=event.kind,
+        actor=event.actor,
+        action_idx=event.action_idx,
+        tier=event.tier,
+        slot=event.slot,
+        card_id=event.card_id,
+        noble_id=event.noble_id,
+    )
+
+
+def _game_event_from_dto(event: GameEventDTO) -> GameEvent:
+    return GameEvent(
+        kind=event.kind,
+        actor=event.actor,
+        action_idx=event.action_idx,
+        tier=event.tier,
+        slot=event.slot,
+        card_id=event.card_id,
+        noble_id=event.noble_id,
+    )
+
+
 def _resolve_checkpoint_id(checkpoint_id: str) -> Path:
     allowed = {item.id: Path(item.path) for item in _scan_checkpoints()}
     path = allowed.get(checkpoint_id)
@@ -1044,6 +1107,18 @@ class GameManager:
     def _resolve_checkpoint(self, checkpoint_id: str) -> Path:
         return _resolve_checkpoint_id(checkpoint_id)
 
+    def _resolve_saved_checkpoint(self, config: GameConfigDTO) -> Path:
+        try:
+            return self._resolve_checkpoint(config.checkpoint_id)
+        except HTTPException:
+            saved_path = Path(config.checkpoint_path)
+            if saved_path.exists():
+                return saved_path
+        raise HTTPException(
+            status_code=400,
+            detail="Saved checkpoint could not be resolved; ensure the original checkpoint still exists",
+        )
+
     def new_game(self, req: NewGameRequest) -> GameSnapshotDTO:
         with self._lock:
             checkpoint_path = self._resolve_checkpoint(req.checkpoint_id)
@@ -1143,6 +1218,95 @@ class GameManager:
 
     def get_state(self) -> GameSnapshotDTO:
         with self._lock:
+            return self._snapshot_locked()
+
+    def save_game(self) -> SavedGameDTO:
+        with self._lock:
+            env, config, game_id = self._require_game_locked()
+            return SavedGameDTO(
+                saved_at=datetime.now(timezone.utc).isoformat(),
+                game_id=game_id,
+                config=GameConfigDTO(
+                    checkpoint_id=config.checkpoint_id,
+                    checkpoint_path=str(config.checkpoint_path),
+                    num_simulations=config.num_simulations,
+                    player_seat="P0" if config.player_seat == "P0" else "P1",
+                    seed=config.seed,
+                    manual_reveal_mode=config.manual_reveal_mode,
+                    analysis_mode=config.analysis_mode,
+                ),
+                exported_state=env.export_state(),
+                move_log=[
+                    MoveLogEntryDTO(
+                        turn_index=item.turn_index,
+                        actor="P0" if item.actor == "P0" else "P1",
+                        action_idx=item.action_idx,
+                        label=item.label,
+                    )
+                    for item in self._move_log
+                ],
+                setup_event_log=[_game_event_to_dto(item) for item in self._setup_event_log],
+                event_log=[_game_event_to_dto(item) for item in self._event_log],
+                redo_log=[_game_event_to_dto(item) for item in self._redo_log],
+                pending_reveals=[
+                    PendingRevealDTO(
+                        zone=item.zone,
+                        tier=item.tier,
+                        slot=item.slot,
+                        reason=item.reason,
+                        actor=item.actor,
+                        action_idx=item.action_idx,
+                    )
+                    for item in self._pending_reveals
+                ],
+                forced_winner=self._forced_winner,
+                rng_state=_json_safe_random_state(self._rng.getstate()),
+            )
+
+    def load_game(self, saved: SavedGameDTO) -> GameSnapshotDTO:
+        with self._lock:
+            checkpoint_path = self._resolve_saved_checkpoint(saved.config)
+            self._cancel_active_job_locked()
+            env = self._ensure_env_locked()
+            env.load_state(saved.exported_state)
+
+            self._game_id = str(saved.game_id or uuid.uuid4())
+            self._config = GameConfig(
+                checkpoint_id=saved.config.checkpoint_id,
+                checkpoint_path=checkpoint_path,
+                num_simulations=int(saved.config.num_simulations),
+                player_seat=str(saved.config.player_seat),
+                seed=int(saved.config.seed),
+                manual_reveal_mode=bool(saved.config.manual_reveal_mode),
+                analysis_mode=bool(saved.config.analysis_mode),
+            )
+            self._move_log = [
+                MoveLogEntry(
+                    turn_index=int(item.turn_index),
+                    actor="P0" if item.actor == "P0" else "P1",
+                    action_idx=int(item.action_idx),
+                    label=str(item.label),
+                )
+                for item in saved.move_log
+            ]
+            self._setup_event_log = [_game_event_from_dto(item) for item in saved.setup_event_log]
+            self._event_log = [_game_event_from_dto(item) for item in saved.event_log]
+            self._redo_log = [_game_event_from_dto(item) for item in saved.redo_log]
+            self._pending_reveals = [
+                PendingReveal(
+                    zone=item.zone,
+                    tier=int(item.tier),
+                    slot=int(item.slot),
+                    reason=item.reason,
+                    actor=item.actor,
+                    action_idx=item.action_idx,
+                )
+                for item in saved.pending_reveals
+            ]
+            self._forced_winner = None if saved.forced_winner is None else int(saved.forced_winner)
+            self._rng = random.Random(int(saved.config.seed))
+            if saved.rng_state is not None:
+                self._rng.setstate(_random_state_from_json(saved.rng_state))
             return self._snapshot_locked()
 
     def _is_player_turn_locked(self, step: StepState, config: GameConfig) -> bool:
@@ -1616,6 +1780,16 @@ def new_game(req: NewGameRequest) -> GameSnapshotDTO:
 @app.get("/api/game/state", response_model=GameSnapshotDTO)
 def game_state() -> GameSnapshotDTO:
     return manager.get_state()
+
+
+@app.get("/api/game/save", response_model=SavedGameDTO)
+def game_save() -> SavedGameDTO:
+    return manager.save_game()
+
+
+@app.post("/api/game/load", response_model=GameSnapshotDTO)
+def game_load(saved: SavedGameDTO) -> GameSnapshotDTO:
+    return manager.load_game(saved)
 
 
 @app.post("/api/game/player-move", response_model=PlayerMoveResponse)
