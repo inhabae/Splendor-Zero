@@ -871,7 +871,6 @@ public:
         float c_puct = 1.25f,
         float eps = 1e-8f,
         int eval_batch_size = 32,
-        int max_depth = 128,
         std::uint64_t rng_seed = 0,
         int root_parallel_workers = 1
     ) const {
@@ -883,7 +882,6 @@ public:
             c_puct,
             eps,
             eval_batch_size,
-            max_depth,
             rng_seed,
             root_parallel_workers
         );
@@ -1331,7 +1329,6 @@ PYBIND11_MODULE(splendor_native, m) {
             py::arg("c_puct") = 1.25f,
             py::arg("eps") = 1e-8f,
             py::arg("eval_batch_size") = 32,
-            py::arg("max_depth") = 128,
             py::arg("rng_seed") = static_cast<std::uint64_t>(0),
             py::arg("root_parallel_workers") = 1
         );
