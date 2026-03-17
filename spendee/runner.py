@@ -201,9 +201,10 @@ class SpendeeBridgeRunner:
             analysis_mode=True,
         )
         key = self._webui_history_key(observed)
-        if self._webui_save_last_key != key:
-            self._webui_save_history.append(payload)
-            self._webui_save_last_key = key
+        if self._webui_save_last_key == key:
+            return
+        self._webui_save_history.append(payload)
+        self._webui_save_last_key = key
         wrapped_payload = dict(payload)
         wrapped_payload["history"] = list(self._webui_save_history)
         wrapped_payload["history_length"] = len(self._webui_save_history)

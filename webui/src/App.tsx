@@ -94,6 +94,7 @@ export function App() {
   const loadInputRef = useRef<HTMLInputElement | null>(null);
   const isSetupLikeView = homeView === 'SETUP' || homeView === 'ANALYSIS';
   const lastLiveSaveUpdatedAtRef = useRef<string | null>(null);
+  const lastAutoAnalyzeKeyRef = useRef<string | null>(null);
 
   const selectedCheckpoint = useMemo(
     () => checkpoints.find((item) => item.id === checkpointId) ?? null,
@@ -235,10 +236,27 @@ export function App() {
     return !(nextSnapshot.pending_reveals?.some((reveal) => isBlockingPendingReveal(reveal)) ?? false);
   }
 
+  function autoAnalyzeKey(nextSnapshot: GameSnapshotDTO): string {
+    return [
+      nextSnapshot.game_id,
+      nextSnapshot.status,
+      nextSnapshot.turn_index,
+      nextSnapshot.player_to_move,
+      nextSnapshot.winner,
+      nextSnapshot.pending_reveals.length,
+      nextSnapshot.move_log.length,
+    ].join(':');
+  }
+
   async function handleSnapshotUpdate(nextSnapshot: GameSnapshotDTO, engineShouldMove = false): Promise<void> {
     setSnapshot(nextSnapshot);
     setUiStatus(deriveUiStatus(nextSnapshot));
-    if (engineShouldMove || shouldAutoAnalyze(nextSnapshot)) {
+    const nextAutoAnalyzeKey = autoAnalyzeKey(nextSnapshot);
+    const shouldStartSearch =
+      engineShouldMove ||
+      (shouldAutoAnalyze(nextSnapshot) && lastAutoAnalyzeKeyRef.current !== nextAutoAnalyzeKey);
+    if (shouldStartSearch) {
+      lastAutoAnalyzeKeyRef.current = nextAutoAnalyzeKey;
       await startEngineThink(searchSimulations);
     }
   }
@@ -337,6 +355,7 @@ export function App() {
     setJobStatus(null);
     setRevealSelections({});
     setActiveRevealKey(null);
+    lastAutoAnalyzeKeyRef.current = null;
 
     if (!checkpointId) {
       throw new Error('Please choose a checkpoint');
@@ -373,6 +392,7 @@ export function App() {
     clearLivePolling();
     setJobStatus(null);
     setSnapshot(null);
+    lastAutoAnalyzeKeyRef.current = null;
     setHomeView(view);
   }
 
@@ -386,6 +406,7 @@ export function App() {
     setActiveRevealKey(null);
     setLiveSaveStatus(null);
     lastLiveSaveUpdatedAtRef.current = null;
+    lastAutoAnalyzeKeyRef.current = null;
     setHomeView('LIVE');
   }
 
@@ -610,6 +631,7 @@ export function App() {
     setJobStatus(null);
     setRevealSelections({});
     setActiveRevealKey(null);
+    lastAutoAnalyzeKeyRef.current = null;
 
     try {
       const raw = await file.text();
