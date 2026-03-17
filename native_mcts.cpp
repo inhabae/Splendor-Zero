@@ -1301,7 +1301,9 @@ NativeMCTSResult run_native_ismcts(
                 path.reserve(64);
                 bool slot_finished = false;
 
-                for (int depth = 0; depth < max_depth; ++depth) {
+                // Keep traversing until terminal or a genuinely new infoset leaf.
+                // We intentionally do not back up a synthetic value at max depth.
+                while (true) {
                     const NodeMetadata node_data = build_node_metadata(sim_state);
                     if (node_data.terminal.is_terminal) {
                         float value = winner_to_value_for_player(
@@ -1354,18 +1356,6 @@ NativeMCTSResult run_native_ismcts(
                     pending.push_back(std::move(req));
                     slot_finished = true;
                     break;
-                }
-                if (!slot_finished) {
-                    float value = 0.0f;
-                    for (auto it = path.rbegin(); it != path.rend(); ++it) {
-                        const float backed = it->same_player ? value : -value;
-                        ISMCTSNode& node = nodes[static_cast<std::size_t>(it->node_index)];
-                        node.total_visit_count += 1;
-                        node.visit_count[static_cast<std::size_t>(it->action)] += 1;
-                        node.value_sum[static_cast<std::size_t>(it->action)] += backed;
-                        value = backed;
-                    }
-                    completed += 1;
                 }
             }
         }
