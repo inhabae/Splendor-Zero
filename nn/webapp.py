@@ -304,6 +304,11 @@ class SavedGameDTO(BaseModel):
     rng_state: Any | None = None
 
 
+class LiveSavedGameDTO(SavedGameDTO):
+    history: list[SavedGameDTO] = Field(default_factory=list)
+    history_length: int | None = None
+
+
 class LiveSaveStatusDTO(BaseModel):
     exists: bool
     path: str
@@ -1099,6 +1104,8 @@ class GameManager:
         self._setup_event_log: list[GameEvent] = []
         self._event_log: list[GameEvent] = []
         self._redo_log: list[GameEvent] = []
+        self._snapshot_history: list[SavedGameDTO] = []
+        self._snapshot_history_index: int | None = None
 
     def list_checkpoints(self) -> list[CheckpointDTO]:
         return _scan_checkpoints()
@@ -1147,6 +1154,53 @@ class GameManager:
             detail="Saved checkpoint could not be resolved; ensure the original checkpoint still exists",
         )
 
+    def _clear_snapshot_history_locked(self) -> None:
+        self._snapshot_history = []
+        self._snapshot_history_index = None
+
+    def _apply_saved_game_locked(self, saved: SavedGameDTO, *, checkpoint_path: Path | None = None) -> None:
+        resolved_checkpoint = checkpoint_path if checkpoint_path is not None else self._resolve_saved_checkpoint(saved.config)
+        env = self._ensure_env_locked()
+        env.load_state(saved.exported_state)
+
+        self._game_id = str(saved.game_id or uuid.uuid4())
+        self._config = GameConfig(
+            checkpoint_id=saved.config.checkpoint_id,
+            checkpoint_path=resolved_checkpoint,
+            num_simulations=int(saved.config.num_simulations),
+            player_seat=str(saved.config.player_seat),
+            seed=int(saved.config.seed),
+            manual_reveal_mode=bool(saved.config.manual_reveal_mode),
+            analysis_mode=bool(saved.config.analysis_mode),
+        )
+        self._move_log = [
+            MoveLogEntry(
+                turn_index=int(item.turn_index),
+                actor="P0" if item.actor == "P0" else "P1",
+                action_idx=int(item.action_idx),
+                label=str(item.label),
+            )
+            for item in saved.move_log
+        ]
+        self._setup_event_log = [_game_event_from_dto(item) for item in saved.setup_event_log]
+        self._event_log = [_game_event_from_dto(item) for item in saved.event_log]
+        self._redo_log = [_game_event_from_dto(item) for item in saved.redo_log]
+        self._pending_reveals = [
+            PendingReveal(
+                zone=item.zone,
+                tier=int(item.tier),
+                slot=int(item.slot),
+                reason=item.reason,
+                actor=item.actor,
+                action_idx=item.action_idx,
+            )
+            for item in saved.pending_reveals
+        ]
+        self._forced_winner = None if saved.forced_winner is None else int(saved.forced_winner)
+        self._rng = random.Random(int(saved.config.seed))
+        if saved.rng_state is not None:
+            self._rng.setstate(_random_state_from_json(saved.rng_state))
+
     def new_game(self, req: NewGameRequest) -> GameSnapshotDTO:
         with self._lock:
             checkpoint_path = self._resolve_checkpoint(req.checkpoint_id)
@@ -1173,6 +1227,7 @@ class GameManager:
             self._setup_event_log = []
             self._event_log = []
             self._redo_log = []
+            self._clear_snapshot_history_locked()
             return self._snapshot_locked()
 
     def _snapshot_locked(self) -> GameSnapshotDTO:
@@ -1240,8 +1295,12 @@ class GameManager:
             hidden_deck_card_ids_by_tier=hidden_deck_card_ids_by_tier,
             hidden_faceup_reveal_candidates=hidden_faceup_reveal_candidates,
             hidden_reserved_reveal_candidates=hidden_reserved_reveal_candidates,
-            can_undo=bool(self._event_log),
-            can_redo=bool(self._redo_log),
+            can_undo=(
+                self._snapshot_history_index is not None and self._snapshot_history_index > 0
+            ) or bool(self._event_log),
+            can_redo=(
+                self._snapshot_history_index is not None and self._snapshot_history_index < len(self._snapshot_history) - 1
+            ) or bool(self._redo_log),
         )
 
     def get_state(self) -> GameSnapshotDTO:
@@ -1293,48 +1352,23 @@ class GameManager:
 
     def load_game(self, saved: SavedGameDTO) -> GameSnapshotDTO:
         with self._lock:
-            checkpoint_path = self._resolve_saved_checkpoint(saved.config)
             self._cancel_active_job_locked()
-            env = self._ensure_env_locked()
-            env.load_state(saved.exported_state)
+            self._clear_snapshot_history_locked()
+            self._apply_saved_game_locked(saved)
+            return self._snapshot_locked()
 
-            self._game_id = str(saved.game_id or uuid.uuid4())
-            self._config = GameConfig(
-                checkpoint_id=saved.config.checkpoint_id,
-                checkpoint_path=checkpoint_path,
-                num_simulations=int(saved.config.num_simulations),
-                player_seat=str(saved.config.player_seat),
-                seed=int(saved.config.seed),
-                manual_reveal_mode=bool(saved.config.manual_reveal_mode),
-                analysis_mode=bool(saved.config.analysis_mode),
-            )
-            self._move_log = [
-                MoveLogEntry(
-                    turn_index=int(item.turn_index),
-                    actor="P0" if item.actor == "P0" else "P1",
-                    action_idx=int(item.action_idx),
-                    label=str(item.label),
-                )
-                for item in saved.move_log
-            ]
-            self._setup_event_log = [_game_event_from_dto(item) for item in saved.setup_event_log]
-            self._event_log = [_game_event_from_dto(item) for item in saved.event_log]
-            self._redo_log = [_game_event_from_dto(item) for item in saved.redo_log]
-            self._pending_reveals = [
-                PendingReveal(
-                    zone=item.zone,
-                    tier=int(item.tier),
-                    slot=int(item.slot),
-                    reason=item.reason,
-                    actor=item.actor,
-                    action_idx=item.action_idx,
-                )
-                for item in saved.pending_reveals
-            ]
-            self._forced_winner = None if saved.forced_winner is None else int(saved.forced_winner)
-            self._rng = random.Random(int(saved.config.seed))
-            if saved.rng_state is not None:
-                self._rng.setstate(_random_state_from_json(saved.rng_state))
+    def load_live_game(self, saved: LiveSavedGameDTO) -> GameSnapshotDTO:
+        with self._lock:
+            self._cancel_active_job_locked()
+            self._clear_snapshot_history_locked()
+            history = list(saved.history)
+            if not history:
+                current_payload = saved.model_dump(exclude={"history", "history_length"})
+                history = [SavedGameDTO.model_validate(current_payload)]
+            checkpoint_path = self._resolve_saved_checkpoint(saved.config)
+            self._snapshot_history = history
+            self._snapshot_history_index = len(history) - 1
+            self._apply_saved_game_locked(self._snapshot_history[self._snapshot_history_index], checkpoint_path=checkpoint_path)
             return self._snapshot_locked()
 
     def _is_player_turn_locked(self, step: StepState, config: GameConfig) -> bool:
@@ -1366,6 +1400,7 @@ class GameManager:
                 self._pending_reveals.append(pending)
 
     def _record_event_locked(self, event: GameEvent) -> None:
+        self._clear_snapshot_history_locked()
         if event.kind in ("reveal_card", "reveal_reserved_card", "reveal_noble") and not self._move_log:
             self._setup_event_log.append(event)
             self._redo_log = []
@@ -1825,6 +1860,13 @@ class GameManager:
     def undo(self) -> GameSnapshotDTO:
         with self._lock:
             self._require_game_locked()
+            if self._snapshot_history_index is not None:
+                if self._snapshot_history_index <= 0:
+                    raise HTTPException(status_code=400, detail="Nothing to undo")
+                self._cancel_active_job_locked()
+                self._snapshot_history_index -= 1
+                self._apply_saved_game_locked(self._snapshot_history[self._snapshot_history_index])
+                return self._snapshot_locked()
             if not self._event_log:
                 raise HTTPException(status_code=400, detail="Nothing to undo")
             self._cancel_active_job_locked()
@@ -1837,6 +1879,13 @@ class GameManager:
     def redo(self) -> GameSnapshotDTO:
         with self._lock:
             self._require_game_locked()
+            if self._snapshot_history_index is not None:
+                if self._snapshot_history_index >= len(self._snapshot_history) - 1:
+                    raise HTTPException(status_code=400, detail="Nothing to redo")
+                self._cancel_active_job_locked()
+                self._snapshot_history_index += 1
+                self._apply_saved_game_locked(self._snapshot_history[self._snapshot_history_index])
+                return self._snapshot_locked()
             if not self._redo_log:
                 raise HTTPException(status_code=400, detail="Nothing to redo")
             self._cancel_active_job_locked()
@@ -1905,10 +1954,10 @@ def live_save_load() -> GameSnapshotDTO:
         raise HTTPException(status_code=404, detail=f"Live save not found: {path}")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        saved = SavedGameDTO.model_validate(payload)
+        saved = LiveSavedGameDTO.model_validate(payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse live save: {exc}") from exc
-    return manager.load_game(saved)
+    return manager.load_live_game(saved)
 
 
 @app.post("/api/game/player-move", response_model=PlayerMoveResponse)
