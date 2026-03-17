@@ -1024,8 +1024,8 @@ def _evaluate_on_replay_full(
     if len(replay) == 0:
         raise RuntimeError("Replay buffer is empty")
 
-    # ReplayBuffer.sample_batch with k=len(replay) returns the full buffer once (order shuffled).
-    batch = replay.sample_batch(len(replay), device=device)
+    # ReplayBuffer.sample_batch with k=len(replay) returns the buffer once (order shuffled).
+    batch = replay.sample_batch(min(8192, len(replay)), device=device)
     states = batch["state"]
     masks = batch["mask"]
     action_target = batch["action_target"]
@@ -1670,7 +1670,7 @@ def run_cycles(
             replay.finalize_generation(
                 replay_games_added=int(collection_metrics.get("replay_games_added", 0.0)),
             )
-            replay_window_target_generations = _rolling_replay_window_generations(global_cycle_idx)
+            replay_window_target_generations = _rolling_replay_window_generations(cycle_idx)
             replay_generations_dropped = replay.trim_generations(replay_window_target_generations)
             replay_added = len(replay) - replay_size_before_collect
 
