@@ -19,6 +19,7 @@ class ISMCTSConfig:
     max_depth: int = 128
     eps: float = 1e-8
     eval_batch_size: int = 32
+    root_parallel_workers: int = 1
 
 
 def _batch_evaluator(model: Any, states_np: np.ndarray, masks_np: np.ndarray, *, device: str):
@@ -76,6 +77,8 @@ def run_ismcts(
         raise ValueError("max_depth must be positive")
     if int(cfg.eval_batch_size) <= 0:
         raise ValueError("eval_batch_size must be positive")
+    if int(cfg.root_parallel_workers) <= 0:
+        raise ValueError("root_parallel_workers must be positive")
 
     py_rng = rng if rng is not None else random
     native_result = env.run_ismcts_native(
@@ -86,6 +89,7 @@ def run_ismcts(
         eval_batch_size=int(cfg.eval_batch_size),
         max_depth=int(cfg.max_depth),
         rng_seed=int(py_rng.getrandbits(64)),
+        root_parallel_workers=int(cfg.root_parallel_workers),
     )
 
     visit_probs = np.asarray(native_result.visit_probs, dtype=np.float32)

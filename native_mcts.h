@@ -51,5 +51,6 @@ NativeMCTSResult run_native_ismcts(
     float eps = 1e-8f,
     int eval_batch_size = 32,
     int max_depth = 128,
-    std::uint64_t rng_seed = 0
+    std::uint64_t rng_seed = 0,
+    int root_parallel_workers = 1
 );
