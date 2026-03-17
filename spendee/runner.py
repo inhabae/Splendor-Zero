@@ -4,6 +4,7 @@ import asyncio
 import random
 import re
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -188,6 +189,7 @@ class SpendeeBridgeRunner:
         if observed is None:
             return
         if self._webui_save_game_id != observed.game_id:
+            self._archive_webui_save(reason="game_changed")
             self._webui_save_history = []
             self._webui_save_last_key = None
             self._webui_save_game_id = observed.game_id
@@ -206,6 +208,36 @@ class SpendeeBridgeRunner:
         wrapped_payload["history"] = list(self._webui_save_history)
         wrapped_payload["history_length"] = len(self._webui_save_history)
         self.logger.write_json("webui_save", wrapped_payload)
+
+    def _archive_webui_save(self, *, reason: str, observed: ObservedBoardState | None = None) -> Path | None:
+        if self._webui_save_game_id is None:
+            return None
+        stamp_source = observed.observed_at if observed is not None else None
+        if stamp_source:
+            try:
+                dt = datetime.fromisoformat(stamp_source.replace("Z", "+00:00"))
+            except ValueError:
+                dt = datetime.now(timezone.utc)
+        else:
+            dt = datetime.now(timezone.utc)
+        archive_name = dt.astimezone(timezone.utc).strftime("webui_save_%Y-%m-%d_%H-%M-%S")
+        archived_path = self.logger.archive_json("webui_save", archive_name)
+        self._webui_save_history = []
+        self._webui_save_last_key = None
+        self._webui_save_game_id = None
+        if archived_path is not None:
+            self.logger.write_json(
+                "last_status",
+                {
+                    "stage": "archived_webui_save",
+                    "reason": reason,
+                    "archived_path": str(archived_path),
+                    "player_seat": self._player_seat,
+                    "seat_verified": self._seat_verified,
+                    "last_action_idx": self._last_action_idx,
+                },
+            )
+        return archived_path
 
     def _artifact_payload(self, payload: dict, *, observed: ObservedBoardState | None = None) -> dict:
         artifact = dict(payload)
@@ -775,6 +807,7 @@ class SpendeeBridgeRunner:
                 while True:
                     active_page = await self._find_active_game_page(context)
                     if active_page is None:
+                        self._archive_webui_save(reason="waiting_for_game")
                         if self.config.auto_manage_rooms:
                             page = await self._find_management_page(context) or page
                             if self._page_is_closed(page):
@@ -789,6 +822,7 @@ class SpendeeBridgeRunner:
                         continue
                     page = active_page
                     if await self._return_to_lobby_if_finished_room(page):
+                        self._archive_webui_save(reason="finished_room")
                         self._write_status(stage="returning_to_lobby")
                         self._write_inactive_action_artifacts(reason="returning_to_lobby")
                         await asyncio.sleep(self.config.poll_interval_sec)
