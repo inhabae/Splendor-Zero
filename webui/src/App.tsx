@@ -9,6 +9,7 @@ import {
   GameSnapshotDTO,
   PlayerMoveResponse,
   RevealCardResponse,
+  SearchType,
   Seat,
 } from './types';
 import { GameBoard } from './components/board/GameBoard';
@@ -70,6 +71,7 @@ export function App() {
   const [checkpointId, setCheckpointId] = useState('');
   const [numSimulations] = useState(400);
   const [searchSimulations, setSearchSimulations] = useState(400);
+  const [searchType, setSearchType] = useState<SearchType>('mcts');
   const [playerSeat] = useState<Seat>('P0');
   const [seed] = useState('');
   const [homeView, setHomeView] = useState<HomeView>('HOME');
@@ -284,7 +286,7 @@ export function App() {
         : fallback;
     const think = await fetchJSON<EngineThinkResponse>('/api/game/engine-think', {
       method: 'POST',
-      body: JSON.stringify({ num_simulations: nextNumSimulations }),
+      body: JSON.stringify({ num_simulations: nextNumSimulations, search_type: searchType }),
     });
     setUiStatus('WAITING_ENGINE');
     clearPolling();
@@ -944,6 +946,14 @@ export function App() {
               {jobStatus?.error && <p className="error">Engine error: {jobStatus.error}</p>}
               {uiStatus !== 'WAITING_ENGINE' && snapshot.status === 'IN_PROGRESS' && (snapshot.config?.analysis_mode || snapshot.player_to_move !== snapshot.config?.player_seat) && (
                 <div className="analysis-search-row">
+                  <select
+                    value={searchType}
+                    onChange={(event) => setSearchType(event.target.value as SearchType)}
+                    aria-label="Search type"
+                  >
+                    <option value="mcts">MCTS</option>
+                    <option value="ismcts">ISMCTS</option>
+                  </select>
                   <input
                     type="number"
                     min={1}

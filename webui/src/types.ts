@@ -1,5 +1,6 @@
 export type Seat = 'P0' | 'P1';
 export type JobStatus = 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED' | 'CANCELLED';
+export type SearchType = 'mcts' | 'ismcts';
 
 export interface CheckpointDTO {
   id: string;
@@ -121,6 +122,7 @@ export interface EngineThinkResponse {
 
 export interface EngineThinkRequest {
   num_simulations?: number;
+  search_type?: SearchType;
 }
 
 export interface EngineJobStatusDTO {
