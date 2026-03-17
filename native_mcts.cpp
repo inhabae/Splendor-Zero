@@ -595,7 +595,6 @@ ISMCTSWorkerResult run_native_ismcts_worker(
     float c_puct,
     float eps,
     int eval_batch_size,
-    int max_depth,
     std::uint64_t rng_seed
 ) {
     std::vector<ISMCTSNode> nodes;
@@ -1458,7 +1457,6 @@ NativeMCTSResult run_native_ismcts(
     float c_puct,
     float eps,
     int eval_batch_size,
-    int max_depth,
     std::uint64_t rng_seed,
     int root_parallel_workers
 ) {
@@ -1467,9 +1465,6 @@ NativeMCTSResult run_native_ismcts(
     }
     if (eval_batch_size <= 0) {
         throw std::invalid_argument("eval_batch_size must be positive");
-    }
-    if (max_depth <= 0) {
-        throw std::invalid_argument("max_depth must be positive");
     }
     if (root_parallel_workers <= 0) {
         throw std::invalid_argument("root_parallel_workers must be positive");
@@ -1513,7 +1508,6 @@ NativeMCTSResult run_native_ismcts(
             c_puct,
             eps,
             eval_batch_size,
-            max_depth,
             worker_seeds[0]
         );
     } else {
@@ -1530,7 +1524,6 @@ NativeMCTSResult run_native_ismcts(
                     c_puct,
                     eps,
                     eval_batch_size,
-                    max_depth,
                     worker_seeds[static_cast<std::size_t>(worker_idx)]
                 );
             } catch (...) {

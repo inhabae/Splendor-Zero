@@ -16,7 +16,6 @@ from .state_schema import ACTION_DIM, STATE_DIM
 class ISMCTSConfig:
     num_simulations: int = 128
     c_puct: float = 1.25
-    max_depth: int = 128
     eps: float = 1e-8
     eval_batch_size: int = 32
     root_parallel_workers: int = 1
@@ -73,8 +72,6 @@ def run_ismcts(
         raise ValueError("run_ismcts called on terminal state")
     if int(cfg.num_simulations) <= 0:
         raise ValueError("num_simulations must be positive")
-    if int(cfg.max_depth) <= 0:
-        raise ValueError("max_depth must be positive")
     if int(cfg.eval_batch_size) <= 0:
         raise ValueError("eval_batch_size must be positive")
     if int(cfg.root_parallel_workers) <= 0:
@@ -87,7 +84,6 @@ def run_ismcts(
         c_puct=float(cfg.c_puct),
         eps=float(cfg.eps),
         eval_batch_size=int(cfg.eval_batch_size),
-        max_depth=int(cfg.max_depth),
         rng_seed=int(py_rng.getrandbits(64)),
         root_parallel_workers=int(cfg.root_parallel_workers),
     )
