@@ -865,6 +865,28 @@ public:
         );
     }
 
+    NativeMCTSResult run_ismcts(
+        py::function evaluator,
+        int num_simulations = 64,
+        float c_puct = 1.25f,
+        float eps = 1e-8f,
+        int eval_batch_size = 32,
+        std::uint64_t rng_seed = 0,
+        int root_parallel_workers = 1
+    ) const {
+        ensure_initialized();
+        return run_native_ismcts(
+            state_,
+            std::move(evaluator),
+            num_simulations,
+            c_puct,
+            eps,
+            eval_batch_size,
+            rng_seed,
+            root_parallel_workers
+        );
+    }
+
     int heuristic_action() const {
         ensure_initialized();
         const auto encoded = state_encoder::encode_state(state_);
@@ -1298,5 +1320,16 @@ PYBIND11_MODULE(splendor_native, m) {
             py::arg("rng_seed") = static_cast<std::uint64_t>(0),
             py::arg("use_forced_playouts") = false,
             py::arg("forced_playouts_k") = 2.0f
+        )
+        .def(
+            "run_ismcts",
+            &NativeEnv::run_ismcts,
+            py::arg("evaluator"),
+            py::arg("num_simulations") = 64,
+            py::arg("c_puct") = 1.25f,
+            py::arg("eps") = 1e-8f,
+            py::arg("eval_batch_size") = 32,
+            py::arg("rng_seed") = static_cast<std::uint64_t>(0),
+            py::arg("root_parallel_workers") = 1
         );
 }

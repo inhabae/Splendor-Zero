@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
 from nn.checkpoints import load_checkpoint
+from nn.ismcts import ISMCTSConfig, run_ismcts
 from nn.mcts import MCTSConfig, run_mcts
 from nn.native_env import SplendorNativeEnv
 
@@ -27,9 +29,43 @@ class DeterminizedMCTSPolicy:
     mcts_config: MCTSConfig
     device: str = "cpu"
     determinization_samples: int = 1
+    search_type: Literal["mcts", "ismcts"] = "mcts"
 
     def __post_init__(self) -> None:
         self._model = load_checkpoint(self.checkpoint_path, device=self.device)
+
+    def _run_search(
+        self,
+        env: SplendorNativeEnv,
+        state,
+        *,
+        turns_taken: int,
+        rng: random.Random,
+    ):
+        if self.search_type == "ismcts":
+            return run_ismcts(
+                env,
+                self._model,
+                state=state,
+                turns_taken=int(turns_taken),
+                device=self.device,
+                config=ISMCTSConfig(
+                    num_simulations=int(self.mcts_config.num_simulations),
+                    c_puct=float(self.mcts_config.c_puct),
+                ),
+                rng=rng,
+            )
+        if self.search_type == "mcts":
+            return run_mcts(
+                env,
+                self._model,
+                state,
+                turns_taken=int(turns_taken),
+                device=self.device,
+                config=self.mcts_config,
+                rng=rng,
+            )
+        raise ValueError(f"Unsupported search_type: {self.search_type}")
 
     def _choose_action_from_payload(
         self,
@@ -40,15 +76,7 @@ class DeterminizedMCTSPolicy:
     ) -> DeterminizedPolicyResult:
         with SplendorNativeEnv() as env:
             state = env.load_state(payload)
-            result = run_mcts(
-                env,
-                self._model,
-                state,
-                turns_taken=int(turns_taken),
-                device=self.device,
-                config=self.mcts_config,
-                rng=rng,
-            )
+            result = self._run_search(env, state, turns_taken=int(turns_taken), rng=rng)
 
         visit_probs = np.asarray(result.visit_probs, dtype=np.float32)
         action_idx = int(np.argmax(visit_probs))
@@ -88,15 +116,7 @@ class DeterminizedMCTSPolicy:
                 if not bool(phase_flags.get("is_return_phase")):
                     break
 
-                result = run_mcts(
-                    env,
-                    self._model,
-                    state,
-                    turns_taken=turns_taken,
-                    device=self.device,
-                    config=self.mcts_config,
-                    rng=random_source,
-                )
+                result = self._run_search(env, state, turns_taken=turns_taken, rng=random_source)
                 visit_probs = np.asarray(result.visit_probs, dtype=np.float32)
                 action_idx = int(np.argmax(visit_probs))
                 if action_idx < 61 or action_idx > 65:

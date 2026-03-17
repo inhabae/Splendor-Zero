@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CatalogCardDTO,
   CatalogNobleDTO,
@@ -9,6 +9,8 @@ import {
   GameSnapshotDTO,
   PlayerMoveResponse,
   RevealCardResponse,
+  SavedGameDTO,
+  SearchType,
   Seat,
 } from './types';
 import { GameBoard } from './components/board/GameBoard';
@@ -70,6 +72,7 @@ export function App() {
   const [checkpointId, setCheckpointId] = useState('');
   const [numSimulations] = useState(400);
   const [searchSimulations, setSearchSimulations] = useState(400);
+  const [searchType, setSearchType] = useState<SearchType>('mcts');
   const [playerSeat] = useState<Seat>('P0');
   const [seed] = useState('');
   const [homeView, setHomeView] = useState<HomeView>('HOME');
@@ -84,6 +87,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
+  const loadInputRef = useRef<HTMLInputElement | null>(null);
   const isSetupLikeView = homeView === 'SETUP' || homeView === 'ANALYSIS';
 
   const selectedCheckpoint = useMemo(
@@ -284,7 +288,7 @@ export function App() {
         : fallback;
     const think = await fetchJSON<EngineThinkResponse>('/api/game/engine-think', {
       method: 'POST',
-      body: JSON.stringify({ num_simulations: nextNumSimulations }),
+      body: JSON.stringify({ num_simulations: nextNumSimulations, search_type: searchType }),
     });
     setUiStatus('WAITING_ENGINE');
     clearPolling();
@@ -316,6 +320,8 @@ export function App() {
     setError(null);
     clearPolling();
     setJobStatus(null);
+    setRevealSelections({});
+    setActiveRevealKey(null);
 
     if (!checkpointId) {
       throw new Error('Please choose a checkpoint');
@@ -531,6 +537,66 @@ export function App() {
       }
     }
     setActiveRevealKey(key);
+  }
+
+  function deriveHomeViewFromSnapshot(nextSnapshot: GameSnapshotDTO): HomeView {
+    if (nextSnapshot.config?.manual_reveal_mode) {
+      return nextSnapshot.config.analysis_mode ? 'ANALYSIS' : 'SETUP';
+    }
+    return 'QUICK';
+  }
+
+  async function onSaveGame(): Promise<void> {
+    setError(null);
+    try {
+      const saved = await fetchJSON<SavedGameDTO>('/api/game/save');
+      const blob = new Blob([JSON.stringify(saved, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      const safeTime = saved.saved_at.replace(/:/g, '-');
+      anchor.href = url;
+      anchor.download = `splendor-game-${safeTime}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  function onLoadGameClick(): void {
+    loadInputRef.current?.click();
+  }
+
+  async function onLoadGameFile(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) {
+      return;
+    }
+
+    setError(null);
+    clearPolling();
+    setJobStatus(null);
+    setRevealSelections({});
+    setActiveRevealKey(null);
+
+    try {
+      const raw = await file.text();
+      const saved = JSON.parse(raw) as SavedGameDTO;
+      const nextSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/load', {
+        method: 'POST',
+        body: JSON.stringify(saved),
+      });
+      if (nextSnapshot.config?.checkpoint_id) {
+        setCheckpointId(nextSnapshot.config.checkpoint_id);
+      }
+      setHomeView(deriveHomeViewFromSnapshot(nextSnapshot));
+      await handleSnapshotUpdate(nextSnapshot);
+    } catch (err) {
+      setError((err as Error).message);
+    }
   }
 
   const canStart = Boolean(selectedCheckpoint) && numSimulations > 0 && numSimulations <= 10000;
@@ -835,11 +901,26 @@ export function App() {
     <main className="app-shell">
       <header>
         <h1>Splendor vs MCTS</h1>
-        {homeView !== 'HOME' && (
-          <button type="button" onClick={() => setHomeView('HOME')}>
-            Back
+        <div className="header-actions">
+          <input
+            ref={loadInputRef}
+            type="file"
+            accept="application/json"
+            className="visually-hidden"
+            onChange={(event) => void onLoadGameFile(event)}
+          />
+          <button type="button" onClick={() => void onSaveGame()} disabled={!snapshot}>
+            Save Game
           </button>
-        )}
+          <button type="button" onClick={onLoadGameClick}>
+            Load Game
+          </button>
+          {homeView !== 'HOME' && (
+            <button type="button" onClick={() => setHomeView('HOME')}>
+              Back
+            </button>
+          )}
+        </div>
       </header>
 
       {homeView === 'HOME' && (
@@ -944,6 +1025,14 @@ export function App() {
               {jobStatus?.error && <p className="error">Engine error: {jobStatus.error}</p>}
               {uiStatus !== 'WAITING_ENGINE' && snapshot.status === 'IN_PROGRESS' && (snapshot.config?.analysis_mode || snapshot.player_to_move !== snapshot.config?.player_seat) && (
                 <div className="analysis-search-row">
+                  <select
+                    value={searchType}
+                    onChange={(event) => setSearchType(event.target.value as SearchType)}
+                    aria-label="Search type"
+                  >
+                    <option value="mcts">MCTS</option>
+                    <option value="ismcts">ISMCTS</option>
+                  </select>
                   <input
                     type="number"
                     min={1}

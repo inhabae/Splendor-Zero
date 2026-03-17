@@ -5,6 +5,7 @@ import random
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from nn.mcts import MCTSConfig
 
@@ -15,6 +16,7 @@ from .logging import BridgeArtifactLogger
 from .observer import ObservedBoardState, SpendeeObserver
 from .selectors import SpendeeSelectorConfig
 from .shadow_state import ShadowState
+from .webui_save import build_webui_save_payload
 
 LIVE_GAME_PAGE_PROBE = """
 (() => {
@@ -58,6 +60,7 @@ class SpendeeBridgeConfig:
     user_data_dir: str
     checkpoint_path: str
     player_seat: str | None = None
+    search_type: Literal["mcts", "ismcts"] = "mcts"
     num_simulations: int = 5000
     determinization_samples: int = 1
     poll_interval_sec: float = 0.5
@@ -101,6 +104,7 @@ class SpendeeBridgeRunner:
                 root_dirichlet_noise=False,
             ),
             determinization_samples=config.determinization_samples,
+            search_type=config.search_type,
         )
         self._last_action_idx: int | None = None
         self._seat_verified = False
@@ -163,6 +167,18 @@ class SpendeeBridgeRunner:
         if extra:
             payload.update(extra)
         self.logger.write_json("last_status", payload)
+
+    def _write_webui_save(self) -> None:
+        if self.shadow.last_observation is None:
+            return
+        payload = build_webui_save_payload(
+            self.shadow,
+            checkpoint_path=self.config.checkpoint_path,
+            num_simulations=self.config.num_simulations,
+            player_seat=self._player_seat,
+            analysis_mode=True,
+        )
+        self.logger.write_json("webui_save", payload)
 
     def _artifact_payload(self, payload: dict, *, observed: ObservedBoardState | None = None) -> dict:
         artifact = dict(payload)
@@ -795,6 +811,7 @@ class SpendeeBridgeRunner:
                         continue
                     self.shadow.apply_observation(observed, expected_action_idx=self._last_action_idx)
                     self._last_action_idx = None
+                    self._write_webui_save()
 
                     if self.config.observe_only or not is_actionable_turn(observed, self._player_seat):
                         stage = "waiting_for_turn"

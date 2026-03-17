@@ -6,11 +6,46 @@ from pathlib import Path
 from typing import Any, Literal
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 from torch.optim import Optimizer
 
 from .model import MaskedPolicyValueNet
 from .state_schema import STATE_DIM
+
+LEGACY_STATE_DIM = 246
+_LEGACY_246_TO_252_DROP_INDICES = (69, 70, 82, 83, 95, 96)
+
+
+def _project_state_for_legacy_checkpoint(state_batch: Tensor) -> Tensor:
+    if state_batch.ndim != 2 or int(state_batch.shape[1]) != STATE_DIM:
+        raise ValueError(
+            f"Legacy checkpoint adapter expects batched states with shape (B, {STATE_DIM}), got {tuple(state_batch.shape)}"
+        )
+    keep = [idx for idx in range(STATE_DIM) if idx not in _LEGACY_246_TO_252_DROP_INDICES]
+    return state_batch[:, keep]
+
+
+class LegacyCheckpointAdapter(nn.Module):
+    compat_adapter = "legacy_246_to_252"
+
+    def __init__(self, base_model: MaskedPolicyValueNet) -> None:
+        super().__init__()
+        self.base_model = base_model
+        self.input_dim = STATE_DIM
+        self.hidden_dim = int(base_model.hidden_dim)
+        self.action_dim = int(base_model.action_dim)
+        self.res_blocks = int(base_model.res_blocks)
+
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        return self.base_model(_project_state_for_legacy_checkpoint(x))
+
+    def export_model_kwargs(self) -> dict[str, int]:
+        return {
+            "input_dim": self.input_dim,
+            "hidden_dim": self.hidden_dim,
+            "action_dim": self.action_dim,
+            "res_blocks": self.res_blocks,
+        }
 
 
 def _canonicalize_model_kwargs(raw_model_kwargs: dict[str, Any]) -> dict[str, int]:
@@ -31,12 +66,25 @@ def _build_model_from_components(
 ) -> nn.Module:
     normalized_kwargs = _canonicalize_model_kwargs(model_kwargs)
     input_dim = int(normalized_kwargs.get("input_dim", STATE_DIM))
-    if input_dim != STATE_DIM:
-        raise ValueError(f"Unsupported checkpoint input_dim {input_dim}; expected {STATE_DIM}")
-    model = MaskedPolicyValueNet(**normalized_kwargs).to(device)
-    model.load_state_dict(state_dict)
-    model.eval()
-    return model
+    if input_dim == STATE_DIM:
+        model = MaskedPolicyValueNet(**normalized_kwargs).to(device)
+        model.load_state_dict(state_dict)
+        model.eval()
+        return model
+    if input_dim == LEGACY_STATE_DIM:
+        if purpose != "inference":
+            raise ValueError(
+                f"Legacy checkpoint input_dim {input_dim} is only supported for inference/evaluation, not {purpose}"
+            )
+        model = MaskedPolicyValueNet(**normalized_kwargs).to(device)
+        model.load_state_dict(state_dict)
+        model.eval()
+        adapter = LegacyCheckpointAdapter(model).to(device)
+        adapter.eval()
+        return adapter
+    raise ValueError(
+        f"Unsupported checkpoint input_dim {input_dim}; expected {STATE_DIM} or legacy {LEGACY_STATE_DIM}"
+    )
 
 
 @dataclass
@@ -161,4 +209,12 @@ def load_model_from_spec(
     model = _build_model_from_components(model_kwargs, state_dict, device=device, purpose="inference")
     if compat_adapter is None:
         return model
+    if compat_adapter == "legacy_246_to_252":
+        if isinstance(model, LegacyCheckpointAdapter):
+            return model
+        if not isinstance(model, MaskedPolicyValueNet):
+            raise ValueError(f"Compatibility adapter {compat_adapter} requires MaskedPolicyValueNet, got {type(model)}")
+        adapter = LegacyCheckpointAdapter(model).to(device)
+        adapter.eval()
+        return adapter
     raise ValueError(f"Unknown checkpoint compatibility adapter: {compat_adapter}")

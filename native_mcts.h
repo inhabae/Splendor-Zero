@@ -42,3 +42,14 @@ NativeMCTSResult run_native_mcts(
     bool use_forced_playouts = false,
     float forced_playouts_k = 2.0f
 );
+
+NativeMCTSResult run_native_ismcts(
+    const GameState& root_state,
+    pybind11::function evaluator,
+    int num_simulations = 64,
+    float c_puct = 1.25f,
+    float eps = 1e-8f,
+    int eval_batch_size = 32,
+    std::uint64_t rng_seed = 0,
+    int root_parallel_workers = 1
+);

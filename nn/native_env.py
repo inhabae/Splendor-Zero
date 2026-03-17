@@ -198,6 +198,11 @@ class SplendorNativeEnv:
             raise RuntimeError("Game not initialized; call reset() first")
         return self._env.run_mcts(evaluator, **kwargs)
 
+    def run_ismcts_native(self, evaluator, **kwargs):
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return self._env.run_ismcts(evaluator, **kwargs)
+
     def hidden_deck_card_ids_by_tier(self) -> dict[int, list[int]]:
         if not self._initialized:
             raise RuntimeError("Game not initialized; call reset() first")

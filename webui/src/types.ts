@@ -1,5 +1,6 @@
 export type Seat = 'P0' | 'P1';
 export type JobStatus = 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED' | 'CANCELLED';
+export type SearchType = 'mcts' | 'ismcts';
 
 export interface CheckpointDTO {
   id: string;
@@ -19,6 +20,16 @@ export interface MoveLogEntryDTO {
   actor: Seat;
   action_idx: number;
   label: string;
+}
+
+export interface GameEventDTO {
+  kind: 'move' | 'reveal_card' | 'reveal_reserved_card' | 'reveal_noble' | 'resign';
+  actor?: Seat | null;
+  action_idx?: number | null;
+  tier?: number | null;
+  slot?: number | null;
+  card_id?: number | null;
+  noble_id?: number | null;
 }
 
 export interface GameConfigDTO {
@@ -114,6 +125,21 @@ export interface GameSnapshotDTO {
   can_redo: boolean;
 }
 
+export interface SavedGameDTO {
+  version: number;
+  saved_at: string;
+  game_id: string;
+  config: GameConfigDTO;
+  exported_state: Record<string, unknown>;
+  move_log: MoveLogEntryDTO[];
+  setup_event_log: GameEventDTO[];
+  event_log: GameEventDTO[];
+  redo_log: GameEventDTO[];
+  pending_reveals: PendingRevealDTO[];
+  forced_winner?: number | null;
+  rng_state?: unknown;
+}
+
 export interface EngineThinkResponse {
   job_id: string;
   status: 'QUEUED' | 'RUNNING';
@@ -121,6 +147,7 @@ export interface EngineThinkResponse {
 
 export interface EngineThinkRequest {
   num_simulations?: number;
+  search_type?: SearchType;
 }
 
 export interface EngineJobStatusDTO {

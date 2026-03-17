@@ -19,6 +19,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seat the bot should control; default is auto-detect from Spendee",
     )
     parser.add_argument("--start-url", default=DEFAULT_SPENDEE_URL, help="Spendee page to open")
+    parser.add_argument(
+        "--search-type",
+        choices=("mcts", "ismcts"),
+        default="mcts",
+        help="Search backend to use for move selection",
+    )
     parser.add_argument("--num-simulations", type=int, default=5000, help="MCTS simulations per move")
     parser.add_argument(
         "--determinization-samples",
@@ -45,6 +51,7 @@ async def _run_async(args: argparse.Namespace) -> None:
         user_data_dir=str(args.user_data_dir),
         checkpoint_path=str(args.checkpoint),
         player_seat=None if str(args.player_seat) == "auto" else str(args.player_seat),
+        search_type=str(args.search_type),
         num_simulations=int(args.num_simulations),
         determinization_samples=int(args.determinization_samples),
         poll_interval_sec=float(args.poll_interval_sec),
