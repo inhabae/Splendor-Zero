@@ -112,6 +112,9 @@ class SpendeeBridgeRunner:
         self._player_seat: str | None = config.player_seat
         self._consecutive_stable_timeouts = 0
         self._consecutive_unsettled_actions = 0
+        self._webui_save_history: list[dict] = []
+        self._webui_save_last_key: tuple[object, ...] | None = None
+        self._webui_save_game_id: str | None = None
 
     def _page_is_closed(self, page) -> bool:
         checker = getattr(page, "is_closed", None)
@@ -168,9 +171,26 @@ class SpendeeBridgeRunner:
             payload.update(extra)
         self.logger.write_json("last_status", payload)
 
+    def _webui_history_key(self, observed: ObservedBoardState) -> tuple[object, ...]:
+        return (
+            observed.game_id,
+            observed.board_version,
+            observed.current_turn_seat,
+            observed.current_job,
+            observed.modal_state.kind,
+            observed.turns_count,
+            observed.no_purchase_count,
+            len(observed.raw_action_items),
+        )
+
     def _write_webui_save(self) -> None:
-        if self.shadow.last_observation is None:
+        observed = self.shadow.last_observation
+        if observed is None:
             return
+        if self._webui_save_game_id != observed.game_id:
+            self._webui_save_history = []
+            self._webui_save_last_key = None
+            self._webui_save_game_id = observed.game_id
         payload = build_webui_save_payload(
             self.shadow,
             checkpoint_path=self.config.checkpoint_path,
@@ -178,7 +198,14 @@ class SpendeeBridgeRunner:
             player_seat=self._player_seat,
             analysis_mode=True,
         )
-        self.logger.write_json("webui_save", payload)
+        key = self._webui_history_key(observed)
+        if self._webui_save_last_key != key:
+            self._webui_save_history.append(payload)
+            self._webui_save_last_key = key
+        wrapped_payload = dict(payload)
+        wrapped_payload["history"] = list(self._webui_save_history)
+        wrapped_payload["history_length"] = len(self._webui_save_history)
+        self.logger.write_json("webui_save", wrapped_payload)
 
     def _artifact_payload(self, payload: dict, *, observed: ObservedBoardState | None = None) -> dict:
         artifact = dict(payload)

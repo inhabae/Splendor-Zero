@@ -18,6 +18,14 @@ def _deterministic_seed(*parts: object) -> int:
     return int.from_bytes(digest.digest()[:8], "big", signed=False)
 
 
+def _game_name_from_timestamp(raw_timestamp: str) -> str:
+    try:
+        dt = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        dt = datetime.now(timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("Spendee %Y-%m-%d %H:%M:%S UTC")
+
+
 def build_webui_save_payload(
     shadow: ShadowState,
     *,
@@ -51,14 +59,17 @@ def build_webui_save_payload(
             "spendee_player_seat": player_seat,
             "spendee_current_turn_seat": observed.current_turn_seat,
             "spendee_current_job": observed.current_job,
+            "spendee_action_history": [int(action_idx) for action_idx in shadow.action_history],
         }
     )
     exported_state["metadata"] = metadata
 
     checkpoint_abs = str(Path(checkpoint_path).resolve())
     saved_at = datetime.now(timezone.utc).isoformat()
+    game_name = _game_name_from_timestamp(observed.observed_at)
     return {
         "version": 1,
+        "game_name": game_name,
         "saved_at": saved_at,
         "game_id": observed.game_id,
         "config": {
