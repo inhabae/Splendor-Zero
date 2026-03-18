@@ -52,6 +52,7 @@ class DeterminizedMCTSPolicy:
                 config=ISMCTSConfig(
                     num_simulations=int(self.mcts_config.num_simulations),
                     c_puct=float(self.mcts_config.c_puct),
+                    eval_batch_size=1,
                 ),
                 rng=rng,
             )

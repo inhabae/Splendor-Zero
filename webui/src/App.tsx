@@ -318,7 +318,7 @@ export function App() {
 
   async function startEngineThink(customNumSimulations?: number): Promise<void> {
     setError(null);
-    const requested = customNumSimulations ?? searchSimulations;
+    const requested = searchSimulations;
     const fallback = snapshot?.config?.num_simulations ?? numSimulations;
     const nextNumSimulations =
       Number.isInteger(requested) && requested >= 1
@@ -1172,7 +1172,7 @@ export function App() {
               )}
               {homeView === 'LIVE' && (
                 <p>
-                  Live mode keeps refining the current turn in {searchSimulations} sim chunks until the board updates or
+                  Live mode keeps refining the current turn in every 400 sim chunks until the board updates or
                   {' '}500,000 total sims.
                   {jobStatus?.result?.total_simulations != null && ` Current total: ${jobStatus.result.total_simulations}.`}
                 </p>

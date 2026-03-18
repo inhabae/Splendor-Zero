@@ -20,7 +20,6 @@ from pydantic import BaseModel, Field
 
 from .checkpoints import load_checkpoint
 from .ismcts import ISMCTSConfig, run_ismcts
-from .mcts import MCTSConfig, run_mcts
 from .native_env import SplendorNativeEnv, StepState, list_standard_cards, list_standard_nobles
 from .selfplay_dataset import (
     list_sessions as list_selfplay_sessions,
@@ -197,6 +196,7 @@ class GameSnapshotDTO(BaseModel):
     hidden_reserved_reveal_candidates: dict[str, list[int]] = Field(default_factory=dict)
     can_undo: bool = False
     can_redo: bool = False
+    determinization_seed: int | None = None
 
 
 class NewGameRequest(BaseModel):
@@ -218,7 +218,7 @@ class EngineApplyRequest(BaseModel):
 
 class EngineThinkRequest(BaseModel):
     num_simulations: int | None = Field(default=None, ge=1, le=500000)
-    search_type: Literal["mcts", "ismcts"] = "mcts"
+    search_type: Literal["mcts", "ismcts"] = "ismcts"
     continuous_until_cancel: bool = False
     max_total_simulations: int | None = Field(default=None, ge=1, le=500000)
 
@@ -1105,6 +1105,7 @@ class GameManager:
         self._redo_log: list[GameEvent] = []
         self._snapshot_history: list[SavedStateDTO] = []
         self._snapshot_history_index: int | None = None
+        self._determinization_seed: int | None = None
 
     def list_checkpoints(self) -> list[CheckpointDTO]:
         return _scan_checkpoints()
@@ -1187,6 +1188,7 @@ class GameManager:
         self._pending_reveals = []
         self._forced_winner = None
         self._rng = random.Random(int(config.seed))
+        self._determinization_seed = random.randint(0, 2**31 - 1)
 
     def new_game(self, req: NewGameRequest) -> GameSnapshotDTO:
         with self._lock:
@@ -1210,6 +1212,7 @@ class GameManager:
             self._turn_index = 0
             self._move_log = []
             self._rng = random.Random(seed)
+            self._determinization_seed = random.randint(0, 2**31 - 1)
             self._forced_winner = None
             self._pending_reveals = _initial_setup_pending_reveals() if bool(req.manual_reveal_mode) else []
             self._setup_event_log = []
@@ -1289,6 +1292,7 @@ class GameManager:
             can_redo=(
                 self._snapshot_history_index is not None and self._snapshot_history_index < len(self._snapshot_history) - 1
             ) or bool(self._redo_log),
+            determinization_seed=self._determinization_seed,
         )
 
     def get_state(self) -> GameSnapshotDTO:
@@ -1535,6 +1539,10 @@ class GameManager:
             model = self._get_model_locked(config)
             search_env = env.clone()
             search_step = search_env.get_state()
+            
+            # Use determinization seed for consistent searches
+            search_rng = random.Random(self._determinization_seed) if self._determinization_seed is not None else self._rng
+            
             num_simulations = int(req.num_simulations) if req is not None and req.num_simulations is not None else config.num_simulations
             search_type = str(req.search_type) if req is not None else "mcts"
             continuous_until_cancel = bool(req.continuous_until_cancel) if req is not None else False
@@ -1576,35 +1584,27 @@ class GameManager:
                             break
                         chunk_simulations = min(num_simulations, remaining)
 
-                        if search_type == "ismcts":
-                            result = run_ismcts(
-                                search_env,
-                                model,
-                                state=search_step,
-                                turns_taken=turns_taken,
-                                device="cpu",
-                                config=ISMCTSConfig(
-                                    num_simulations=chunk_simulations,
-                                    c_puct=1.25,
-                                ),
-                                rng=self._rng,
-                            )
-                        else:
-                            result = run_mcts(
-                                search_env,
-                                model,
-                                state=search_step,
-                                turns_taken=turns_taken,
-                                device="cpu",
-                                config=MCTSConfig(
-                                    num_simulations=chunk_simulations,
-                                    c_puct=1.25,
-                                    temperature_moves=0,
-                                    temperature=0.0,
-                                    root_dirichlet_noise=False,
-                                ),
-                                rng=self._rng,
-                            )
+                        import time
+                        start_time = time.time()
+                        result = run_ismcts(
+                            search_env,
+                            model,
+                            state=search_step,
+                            turns_taken=turns_taken,
+                            device="cpu",
+                            config=ISMCTSConfig(
+                                num_simulations=chunk_simulations,
+                                c_puct=1.25,
+                                eval_batch_size=1,
+                            ),
+                            rng=search_rng,
+                        )
+                        elapsed = time.time() - start_time
+                        print(f"[ISMCTS] Time: {elapsed:.3f}s | Sims: {chunk_simulations} | "
+                              f"Requested: {result.search_slots_requested} | "
+                              f"Evaluated: {result.search_slots_evaluated} | "
+                              f"Dropped (pending): {result.search_slots_drop_pending_eval} | "
+                              f"Dropped (no action): {result.search_slots_drop_no_action}", flush=True)
 
                         estimated_visits = np.asarray(result.visit_probs, dtype=np.float64) * float(chunk_simulations)
                         accumulated_visits += estimated_visits
