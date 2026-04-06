@@ -498,17 +498,6 @@ class GameEvent:
     card_id: int | None = None
     noble_id: int | None = None
 
-
-def _append_or_merge_move_log_entry(log: list[MoveLogEntry], entry: MoveLogEntry) -> None:
-    if _is_continuation_action(entry.action_idx) and log and log[-1].actor == entry.actor:
-        prior = log[-1]
-        prior.label = f"{prior.label} + {entry.label}"
-        prior.result_turn_index = entry.result_turn_index
-        prior.result_snapshot_index = entry.result_snapshot_index
-        return
-    log.append(entry)
-
-
 @dataclass
 class PendingReveal:
     zone: Literal["faceup_card", "reserved_card", "noble"]
@@ -1785,8 +1774,7 @@ class GameManager:
                     and int(end_hist_len) == int(start_hist_len)
                 ):
                     continue
-                _append_or_merge_move_log_entry(
-                    rebuilt,
+                rebuilt.append(
                     MoveLogEntry(
                         turn_index=max(0, int(end_saved.turn_index) - 1),
                         result_turn_index=int(end_saved.turn_index),
@@ -1795,15 +1783,14 @@ class GameManager:
                         action_idx=-1,
                         label="INFERRED unknown move",
                         display=None,
-                    ),
+                    )
                 )
                 continue
 
             start_turn_index = max(0, int(end_saved.turn_index) - len(inferred_actions))
             for offset, inferred in enumerate(inferred_actions):
                 turn_index = start_turn_index + offset
-                _append_or_merge_move_log_entry(
-                    rebuilt,
+                rebuilt.append(
                     MoveLogEntry(
                         turn_index=turn_index,
                         result_turn_index=turn_index + 1,
@@ -1812,7 +1799,7 @@ class GameManager:
                         action_idx=int(inferred),
                         label=_describe_action(int(inferred)),
                         display=_build_action_display(int(inferred), board_before, actor),
-                    ),
+                    )
                 )
 
         self._move_log = rebuilt
@@ -2051,8 +2038,7 @@ class GameManager:
         action_idx = int(action_idx)
         label = _describe_action(action_idx)
         result_turn_index = self._turn_index + 1
-        _append_or_merge_move_log_entry(
-            self._move_log,
+        self._move_log.append(
             MoveLogEntry(
                 turn_index=self._turn_index,
                 result_turn_index=result_turn_index,

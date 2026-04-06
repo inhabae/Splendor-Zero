@@ -2216,19 +2216,32 @@ export function App() {
 
   const isBoardView = (homeView === 'QUICK' || isSetupLikeView || homeView === 'LIVE') && snapshot;
 
+  function renderMoveContent(move: MoveLogDisplayEntry): JSX.Element {
+    const parts = move.label.split(' + ').filter((part) => part.length > 0);
+    const extras = parts.slice(1);
+    return (
+      <span className="action-label">
+        <ActionLabel actionIdx={move.action_idx} display={move.display ?? null} board={displayBoard ?? snapshot?.board_state ?? null} />
+        {extras.map((part, idx) => (
+          <span key={`${move.result_snapshot_index}-extra-${idx}`} className="action-meta">{` + ${part}`}</span>
+        ))}
+      </span>
+    );
+  }
+
   function renderMoveLabel(move: MoveLogDisplayEntry | undefined): JSX.Element | string {
     if (!move) {
       return '-';
     }
     const entry = deepAnalysisBySnapshot[move.result_snapshot_index];
     if (!entry) {
-      return <ActionLabel actionIdx={move.action_idx} display={move.display ?? null} board={displayBoard ?? snapshot?.board_state ?? null} />;
+      return renderMoveContent(move);
     }
     const categoryClass = entry.category.toLowerCase();
     return (
       <span className="move-log-label-wrap">
         <span className="move-log-label-main">
-          <ActionLabel actionIdx={move.action_idx} display={move.display ?? null} board={displayBoard ?? snapshot?.board_state ?? null} />
+          {renderMoveContent(move)}
         </span>
         <span className={`deep-analysis-badge ${categoryClass}`}>{deepAnalysisBadgeText(entry)}</span>
       </span>
@@ -2511,7 +2524,11 @@ export function App() {
                         </div>
                         <div className="analysis-line-name">
                           {detail
-                            ? (detail.label ? detail.label : <ActionLabel actionIdx={detail.action_idx} board={snapshot.board_state} />)
+                            ? <ActionLabel
+                                actionIdx={detail.action_idx}
+                                display={detail.display ?? null}
+                                board={displayBoard ?? snapshot?.board_state ?? null}
+                              />
                             : 'Waiting for search...'}
                         </div>
                       </div>
