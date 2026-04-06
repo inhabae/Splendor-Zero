@@ -278,7 +278,7 @@ export function App() {
     return snapshot?.move_log ?? [];
   }, [loadedMoveLog, snapshot?.move_log]);
   const moveLogDisplayEntries = useMemo<MoveLogDisplayEntry[]>(() => {
-    let fullMoveNumber = 1;
+    let fullMoveNumber = 0;
     let continuationIndex = 0;
     let prevActor: Seat | null = null;
 
@@ -291,11 +291,14 @@ export function App() {
         continuationIndex += 1;
       } else if (isContinuation) {
         continuationIndex = 1;
+        fullMoveNumber = Math.max(1, fullMoveNumber);
       } else {
         continuationIndex = 0;
-        fullMoveNumber = move.actor === 'P0'
-          ? Math.max(1, move.result_turn_index)
-          : Math.max(1, move.result_turn_index - 1);
+        if (displayActor === 'P0') {
+          fullMoveNumber += 1;
+        } else if (fullMoveNumber <= 0) {
+          fullMoveNumber = 1;
+        }
       }
 
       const suffix = continuationSuffix(continuationIndex);
