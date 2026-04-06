@@ -1114,16 +1114,16 @@ button:disabled {
   text-shadow: -1px 0 #454b56, 0 1px #454b56, 1px 0 #454b56, 0 -1px #454b56;
 }
 
-.card-white,
-.token-white { background: #f4f1e8; }
-.card-blue,
-.token-blue { background: #1f3a8a; }
-.card-green,
-.token-green { background: #1f6b4f; }
-.card-red,
+.card-white { background: #E8E5DC; }
+.token-white { background: #FFFFFF; }
+.card-blue { background: #30478A; }
+.token-blue { background: #28459E; }
+.card-green { background: #20805C; }
+.token-green { background: #1F7D5A; }
+.card-red { background: #A64242; }
 .token-red { background: #9f2f2f; }
-.card-black { background: #363533; }
-.token-black { background: #34373c; }
+.card-black { background: #38322a; }
+.token-black { background: #2E2923; }
 .token-gold { background: #d6b35f; }
 
 .actions ul,
