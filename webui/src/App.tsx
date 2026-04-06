@@ -668,17 +668,21 @@ export function App() {
     return match?.id ?? null;
   }
 
-  async function startEngineThink(): Promise<void> {
+  async function startEngineThink(options?: {
+    searchTypeOverride?: SearchType;
+    snapshotOverride?: GameSnapshotDTO | null;
+  }): Promise<void> {
     setError(null);
     const requested = searchSimulations;
-    const fallback = snapshot?.config?.num_simulations ?? numSimulations;
+    const baseSnapshot = options?.snapshotOverride ?? snapshot;
+    const fallback = baseSnapshot?.config?.num_simulations ?? numSimulations;
     const nextNumSimulations =
       Number.isInteger(requested) && requested >= 1
         ? requested
         : fallback;
     const thinkRequest: Record<string, unknown> = {
       num_simulations: nextNumSimulations,
-      search_type: searchType,
+      search_type: options?.searchTypeOverride ?? searchType,
       continuous_until_cancel: homeView === 'LIVE',
       max_total_simulations: homeView === 'LIVE' ? LIVE_SEARCH_MAX_SIMULATIONS : nextNumSimulations,
     };
@@ -863,11 +867,12 @@ export function App() {
     };
   }
 
-  function deepAnalysisBadgeText(entry: DeepAnalysisEntry): string {
-    if (entry.qLoss == null) {
-      return entry.category;
-    }
-    return `${entry.category} dQ ${entry.qLoss.toFixed(2)}`;
+  function deepAnalysisBadgeSymbol(entry: DeepAnalysisEntry): string {
+    return entry.category === 'Blunder' ? '??' : '?';
+  }
+
+  function shouldShowDeepAnalysisBadge(entry: DeepAnalysisEntry): boolean {
+    return entry.category === 'Mistake' || entry.category === 'Blunder';
   }
 
   async function runSingleDeepAnalysis(simulations: number, forcedRootActionIdx?: number): Promise<EngineJobStatusDTO> {
@@ -1014,7 +1019,13 @@ export function App() {
     };
   }
 
-  async function onPlayerMove(actionIdx: number): Promise<void> {
+  async function onPlayerMove(
+    actionIdx: number,
+    options?: {
+      suppressAutoAnalyze?: boolean;
+      analyzeWithSearchType?: SearchType | null;
+    },
+  ): Promise<void> {
     const beforeSnapshot = snapshot;
     const beforeSnapshotIndex = currentSnapshotIndex;
     setError(null);
@@ -1105,12 +1116,66 @@ export function App() {
         }
       }
 
-      await handleSnapshotUpdate(result.snapshot, result.engine_should_move);
+      const forcedSearchType = options?.analyzeWithSearchType ?? null;
+      const shouldSuppressAutoAnalyze = options?.suppressAutoAnalyze ?? false;
+      const shouldSuppressInHandle = shouldSuppressAutoAnalyze || forcedSearchType != null || isLoadedPostAnalysisGame;
+      if (shouldSuppressInHandle) {
+        lastAutoAnalyzeKeyRef.current = autoAnalyzeKey(result.snapshot);
+      }
+      await handleSnapshotUpdate(
+        result.snapshot,
+        !shouldSuppressInHandle && result.engine_should_move,
+        null,
+        shouldSuppressInHandle,
+      );
+      if (forcedSearchType && shouldAutoAnalyze(result.snapshot)) {
+        await startEngineThink({
+          searchTypeOverride: forcedSearchType,
+          snapshotOverride: result.snapshot,
+        });
+      }
     } catch (err) {
       setError((err as Error).message);
     }
   }
   void onPlayerMove;
+
+  async function onSelectAnalysisAction(actionIdx: number): Promise<void> {
+    if (!snapshot) {
+      return;
+    }
+
+    const actor = snapshot.player_to_move;
+    const variationCtx = deriveVariationContext(snapshot, currentSnapshotIndex, actor);
+    const mainlineMove = variationCtx?.expectedMainlineMove ?? null;
+    if (mainlineMove && mainlineMove.action_idx === actionIdx) {
+      await onJumpToSnapshot(mainlineMove.result_snapshot_index, false, !autoAnalyzeOnNavigation, false);
+      return;
+    }
+
+    if (highlightedVariation) {
+      const activeBranch = variationBranches.find((branch) => branch.id === highlightedVariation.branchId) ?? null;
+      const nextMove = activeBranch?.moves[highlightedVariation.moveIndex + 1] ?? null;
+      if (nextMove?.kind === 'move' && nextMove.actionIdx === actionIdx) {
+        await onJumpToVariationMove(activeBranch, highlightedVariation.moveIndex + 1, !autoAnalyzeOnNavigation);
+        return;
+      }
+    }
+
+    const anchoredBranch = (variationBranchByAnchor.get(currentSnapshotIndex) ?? []).find((branch) => {
+      const firstMove = branch.moves[0];
+      return firstMove?.kind === 'move' && firstMove.actionIdx === actionIdx;
+    }) ?? null;
+    if (anchoredBranch) {
+      await onJumpToVariationMove(anchoredBranch, 0, !autoAnalyzeOnNavigation);
+      return;
+    }
+
+    await onPlayerMove(actionIdx, {
+      suppressAutoAnalyze: true,
+      analyzeWithSearchType: 'mcts',
+    });
+  }
 
   async function onUndoToStart(suppressAutoAnalyze = false): Promise<void> {
     setError(null);
@@ -1886,6 +1951,13 @@ export function App() {
       })
       .slice(0, 3);
   }, [currentDeepAnalysisSearch, jobStatus]);
+  const playedAnalysisMove = useMemo(() => {
+    if (!currentDeepAnalysisEntry) {
+      return null;
+    }
+    const details = currentDeepAnalysisSearch?.action_details ?? jobStatus?.result?.action_details ?? [];
+    return details.find((detail) => detail.action_idx === currentDeepAnalysisEntry.playedActionIdx) ?? null;
+  }, [currentDeepAnalysisEntry, currentDeepAnalysisSearch, jobStatus]);
   const allAnalysisMoves = useMemo(() => {
     const details = snapshot?.legal_action_details ?? [];
     return details
@@ -2245,7 +2317,7 @@ export function App() {
       return '-';
     }
     const entry = deepAnalysisBySnapshot[move.result_snapshot_index];
-    if (!entry) {
+    if (!entry || !shouldShowDeepAnalysisBadge(entry)) {
       return renderMoveContent(move);
     }
     const categoryClass = entry.category.toLowerCase();
@@ -2254,7 +2326,13 @@ export function App() {
         <span className="move-log-label-main">
           {renderMoveContent(move)}
         </span>
-        <span className={`deep-analysis-badge ${categoryClass}`}>{deepAnalysisBadgeText(entry)}</span>
+        <span
+          className={`deep-analysis-badge ${categoryClass}`}
+          aria-label={entry.category}
+          title={entry.category}
+        >
+          <span aria-hidden="true">{deepAnalysisBadgeSymbol(entry)}</span>
+        </span>
       </span>
     );
   }
@@ -2536,14 +2614,53 @@ export function App() {
               <div className="analysis-panel-body">
                 {analysisPanelTab === 'ANALYSIS' && showBoardAnalysis && (
                   <div className="analysis-lines" role="list">
+                      {currentDeepAnalysisEntry && (
+                        <div className="analysis-played-block">
+                          <div className="analysis-section-header">Move played</div>
+                          <div className="analysis-line" role="listitem">
+                            <div className="analysis-line-stats">
+                              <span
+                                className={`analysis-line-q ${topMoveEvalClass(
+                                  currentDeepAnalysisEntry.playedQ,
+                                  snapshot?.player_to_move ?? null,
+                                )}`}
+                              >
+                                {formatTopMoveEval(currentDeepAnalysisEntry.playedQ, snapshot?.player_to_move ?? null)}
+                              </span>
+                              <span className="analysis-line-visit analysis-line-visit-placeholder" aria-hidden="true">
+                                --
+                              </span>
+                            </div>
+                            <div className="analysis-line-name">
+                              {playedAnalysisMove
+                                ? (
+                                    <ActionLabel
+                                      actionIdx={playedAnalysisMove.action_idx}
+                                      display={playedAnalysisMove.display ?? null}
+                                      board={displayBoard ?? snapshot?.board_state ?? null}
+                                    />
+                                  )
+                                : currentDeepAnalysisEntry.playedActionIdx}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      <div className="analysis-section-header">Top moves</div>
                       {Array.from({ length: 3 }, (_, index) => {
                         const detail = topAnalysisMoves[index] ?? null;
                         const evalClass = topMoveEvalClass(detail?.q_value ?? null, snapshot?.player_to_move ?? null);
                         return (
-                          <div
+                          <button
                             key={detail ? `analysis-line-${detail.action_idx}` : `analysis-line-placeholder-${index}`}
-                            className={`analysis-line ${detail ? '' : 'placeholder'}`}
+                            type="button"
+                            className={`analysis-line analysis-line-button ${detail ? '' : 'placeholder'}`}
                             role="listitem"
+                            disabled={!detail}
+                            onClick={() => {
+                              if (detail) {
+                                void onSelectAnalysisAction(detail.action_idx);
+                              }
+                            }}
                           >
                             <div className="analysis-line-stats">
                               <span className={`analysis-line-q ${evalClass}`}>
@@ -2562,7 +2679,7 @@ export function App() {
                                   />
                                 : 'Waiting for search...'}
                             </div>
-                          </div>
+                          </button>
                         );
                       })}
                   </div>
@@ -2576,10 +2693,14 @@ export function App() {
                       <div className="analysis-line placeholder analysis-panel-empty" role="listitem">Waiting for search...</div>
                     ) : (
                       allAnalysisMoves.map((detail) => (
-                        <div
+                        <button
                           key={`analysis-move-${detail.action_idx}`}
-                          className="analysis-line analysis-line-move-only"
+                          type="button"
+                          className="analysis-line analysis-line-move-only analysis-line-button"
                           role="listitem"
+                          onClick={() => {
+                            void onSelectAnalysisAction(detail.action_idx);
+                          }}
                         >
                           <div className="analysis-line-name">
                             <ActionLabel
@@ -2588,7 +2709,7 @@ export function App() {
                               board={displayBoard ?? snapshot?.board_state ?? null}
                             />
                           </div>
-                        </div>
+                        </button>
                       ))
                     )}
                   </div>

@@ -1589,6 +1589,21 @@ button:disabled {
   min-height: 0;
 }
 
+.analysis-played-block {
+  display: grid;
+  gap: 0.2rem;
+  margin-bottom: 0.18rem;
+}
+
+.analysis-section-header {
+  color: #9aa6bb;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0 0.2rem;
+}
+
 .analysis-moves-list {
   display: grid;
   gap: 0.24rem;
@@ -1607,9 +1622,9 @@ button:disabled {
 }
 
 .analysis-panel-body {
-  height: 164px;
-  min-height: 164px;
-  max-height: 164px;
+  height: 256px;
+  min-height: 256px;
+  max-height: 256px;
   overflow: hidden;
 }
 
@@ -1634,6 +1649,32 @@ button:disabled {
   border-radius: 8px;
   background: #171a1f;
   border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.analysis-line-button {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    transform 140ms ease;
+}
+
+.analysis-line-button:hover:not(:disabled),
+.analysis-line-button:focus-visible {
+  background: #1b2027;
+  border-color: rgba(95, 160, 255, 0.38);
+}
+
+.analysis-line-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.analysis-line-button:disabled {
+  cursor: default;
 }
 
 .analysis-line.placeholder {
@@ -1679,6 +1720,10 @@ button:disabled {
   min-width: 3.85rem;
   padding: 0.16rem 0.42rem;
   border-radius: 999px;
+}
+
+.analysis-line-visit-placeholder {
+  visibility: hidden;
 }
 
 .analysis-line-q.white-side {
@@ -1836,12 +1881,26 @@ button:disabled {
 }
 
 .deep-analysis-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.55rem;
+  height: 1.55rem;
+  min-width: 1.55rem;
   border-radius: 999px;
-  padding: 0.04rem 0.35rem;
-  font-size: 0.66rem;
-  font-weight: 800;
-  border: 1px solid transparent;
+  padding: 0;
+  font-size: 0.98rem;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -0.1em;
+  border: none;
   flex-shrink: 0;
+  box-shadow:
+    inset 0 -0.08rem 0 rgba(0, 0, 0, 0.2),
+    0 0.08rem 0.18rem rgba(0, 0, 0, 0.35);
+  text-shadow:
+    0 0.05rem 0 rgba(0, 0, 0, 0.22),
+    0 0.08rem 0 rgba(0, 0, 0, 0.16);
 }
 
 .deep-analysis-badge.best {
@@ -1857,15 +1916,13 @@ button:disabled {
 }
 
 .deep-analysis-badge.mistake {
-  background: #fff4d8;
-  color: #875a08;
-  border-color: #e6c277;
+  background: #f29a2e;
+  color: #ffffff;
 }
 
 .deep-analysis-badge.blunder {
-  background: #ffe2de;
-  color: #8f2218;
-  border-color: #e79f97;
+  background: #ff4b36;
+  color: #ffffff;
 }
 
 .deep-analysis-badge.unknown {
