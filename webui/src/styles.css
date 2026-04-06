@@ -958,6 +958,21 @@ button:disabled {
   padding-left: 0.22rem;
 }
 
+.card-costs-count-3 > :nth-child(1) {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.card-costs-count-3 > :nth-child(2) {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.card-costs-count-3 > :nth-child(3) {
+  grid-column: 2;
+  grid-row: 2;
+}
+
 .card-placeholder-mark {
   width: 100%;
   display: grid;
@@ -1426,20 +1441,37 @@ button:disabled {
   background: #1a1e24;
 }
 
-.analysis-header-row {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 0.8rem;
-  margin-bottom: 0.25rem;
+.analysis-panel-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.35rem;
+  margin-bottom: 0.42rem;
+  padding: 0.16rem;
+  border-radius: 12px;
+  background: #14181d;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  overflow: visible;
 }
 
-.analysis-header-row h2 {
-  margin-bottom: 0;
-  font-family: "Manrope", "Avenir Next", sans-serif;
-  font-size: 1.18rem;
+.analysis-panel-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0.3rem 0.55rem;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #aeb8c9;
+  font-size: 0.84rem;
   font-weight: 800;
-  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.analysis-panel-tab.active {
+  background: #24211b;
+  border-color: rgba(255, 255, 255, 0.05);
+  color: #f3f5fa;
 }
 
 .analysis-controls-row {
@@ -1544,8 +1576,40 @@ button:disabled {
 .analysis-lines {
   display: grid;
   gap: 0.22rem;
-  margin: 0.5rem 0 0;
-  min-height: 108px;
+  margin: 0;
+  min-height: 0;
+}
+
+.analysis-moves-list {
+  display: grid;
+  gap: 0.24rem;
+  margin: 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  padding-right: 0.08rem;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.analysis-moves-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.analysis-panel-body {
+  height: 164px;
+  min-height: 164px;
+  max-height: 164px;
+  overflow: hidden;
+}
+
+.analysis-panel-body .analysis-line.placeholder {
+  color: #9aa6bb;
+  min-height: 84px;
+  display: grid;
+  place-items: center;
+  height: 100%;
 }
 
 .analysis-line {
@@ -1561,6 +1625,10 @@ button:disabled {
 
 .analysis-line.placeholder {
   opacity: 0.72;
+}
+
+.analysis-line-move-only {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .analysis-line-name {

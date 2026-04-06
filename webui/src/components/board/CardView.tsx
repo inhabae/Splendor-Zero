@@ -37,7 +37,7 @@ export function CardView({
           {isHiddenReservedCard ? '' : isPlaceholder ? '?' : card.points > 0 ? card.points : ''}
         </span>
       </header>
-      <div className="card-costs">
+      <div className={`card-costs card-costs-count-${reqs.length}`}>
         {isPlaceholder && <div className="card-placeholder-mark">?</div>}
         {!isPlaceholder && reqs.map((color) => (
           <span key={color} className={`cost-chip cost-circle token-${color}`}>

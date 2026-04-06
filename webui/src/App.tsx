@@ -23,6 +23,7 @@ import { NobleView } from './components/board/NobleView';
 
 type UiStatus = 'IDLE' | 'WAITING_ENGINE' | 'WAITING_PLAYER' | 'WAITING_REVEAL' | 'GAME_OVER';
 type HomeView = 'HOME' | 'QUICK' | 'ANALYSIS' | 'LIVE';
+type AnalysisPanelTab = 'ANALYSIS' | 'MOVES';
 const COLOR_ORDER: CatalogCardDTO['bonus_color'][] = ['white', 'blue', 'green', 'red', 'black'];
 
 const POLL_MS = 400;
@@ -213,6 +214,7 @@ export function App() {
   const [uiStatus, setUiStatus] = useState<UiStatus>('IDLE');
   const [liveSaveStatus, setLiveSaveStatus] = useState<LiveSaveStatusDTO | null>(null);
   const [displayedP1EvalValue, setDisplayedP1EvalValue] = useState<number | null>(null);
+  const [analysisPanelTab, setAnalysisPanelTab] = useState<AnalysisPanelTab>('ANALYSIS');
   const [deepAnalysisBySnapshot, setDeepAnalysisBySnapshot] = useState<Record<number, DeepAnalysisEntry>>({});
   const [deepAnalysisSearchBySnapshot, setDeepAnalysisSearchBySnapshot] = useState<Record<number, DeepAnalysisSearchResult>>({});
   const [isLoadedPostAnalysisGame, setIsLoadedPostAnalysisGame] = useState(false);
@@ -1884,6 +1886,13 @@ export function App() {
       })
       .slice(0, 3);
   }, [currentDeepAnalysisSearch, jobStatus]);
+  const allAnalysisMoves = useMemo(() => {
+    const details = currentDeepAnalysisSearch?.action_details ?? jobStatus?.result?.action_details ?? [];
+    return details
+      .filter((detail) => !detail.masked)
+      .slice()
+      .sort((a, b) => a.action_idx - b.action_idx);
+  }, [currentDeepAnalysisSearch, jobStatus]);
   const displayBoard = useMemo(() => {
     if (!snapshot?.board_state) {
       return null;
@@ -2435,10 +2444,28 @@ export function App() {
 
           <aside className="engine-column">
             <div className="engine-box">
-              <div className="analysis-header-row">
-                <h2>Analysis</h2>
+              <div className="analysis-panel-tabs" role="tablist" aria-label="Analysis panel sections">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={analysisPanelTab === 'ANALYSIS'}
+                  className={`analysis-panel-tab ${analysisPanelTab === 'ANALYSIS' ? 'active' : ''}`}
+                  onClick={() => setAnalysisPanelTab('ANALYSIS')}
+                >
+                  <span>Analysis</span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={analysisPanelTab === 'MOVES'}
+                  className={`analysis-panel-tab ${analysisPanelTab === 'MOVES' ? 'active' : ''}`}
+                  onClick={() => setAnalysisPanelTab('MOVES')}
+                >
+                  <span>Moves</span>
+                </button>
               </div>
-              <div className="analysis-controls-row">
+              {analysisPanelTab === 'ANALYSIS' && (
+                <div className="analysis-controls-row">
                 <label className="analysis-toggle">
                   <input
                     type="checkbox"
@@ -2495,7 +2522,8 @@ export function App() {
                     </div>
                   )}
                 </div>
-              </div>
+                </div>
+              )}
               {homeView === 'LIVE' && <p>Watching {liveSaveStatus?.path ?? 'live save file'}.</p>}
               {uiStatus === 'WAITING_REVEAL' && <p>Waiting for board update before the next move.</p>}
               {jobStatus?.error && <p className="error">Engine error: {jobStatus.error}</p>}
@@ -2506,39 +2534,67 @@ export function App() {
                   {jobStatus?.result?.total_simulations != null && ` Current total: ${jobStatus.result.total_simulations}.`}
                 </p>
               )}
-              {showBoardAnalysis && (
-                <div className="analysis-lines" role="list">
-                  {Array.from({ length: 3 }, (_, index) => {
-                    const detail = topAnalysisMoves[index] ?? null;
-                    const evalClass = topMoveEvalClass(detail?.q_value ?? null, snapshot?.player_to_move ?? null);
-                    return (
-                      <div
-                        key={detail ? `analysis-line-${detail.action_idx}` : `analysis-line-placeholder-${index}`}
-                        className={`analysis-line ${detail ? '' : 'placeholder'}`}
-                        role="listitem"
-                      >
-                        <div className="analysis-line-stats">
-                          <span className={`analysis-line-q ${evalClass}`}>
-                            {detail ? formatTopMoveEval(detail.q_value, snapshot?.player_to_move ?? null) : '--'}
-                          </span>
-                          <span className="analysis-line-visit">
-                            {detail ? `${(detail.policy_prob * 100).toFixed(1)}%` : '--'}
-                          </span>
+              <div className="analysis-panel-body">
+                {analysisPanelTab === 'ANALYSIS' && showBoardAnalysis && (
+                  <div className="analysis-lines" role="list">
+                      {Array.from({ length: 3 }, (_, index) => {
+                        const detail = topAnalysisMoves[index] ?? null;
+                        const evalClass = topMoveEvalClass(detail?.q_value ?? null, snapshot?.player_to_move ?? null);
+                        return (
+                          <div
+                            key={detail ? `analysis-line-${detail.action_idx}` : `analysis-line-placeholder-${index}`}
+                            className={`analysis-line ${detail ? '' : 'placeholder'}`}
+                            role="listitem"
+                          >
+                            <div className="analysis-line-stats">
+                              <span className={`analysis-line-q ${evalClass}`}>
+                                {detail ? formatTopMoveEval(detail.q_value, snapshot?.player_to_move ?? null) : '--'}
+                              </span>
+                              <span className="analysis-line-visit">
+                                {detail ? `${(detail.policy_prob * 100).toFixed(1)}%` : '--'}
+                              </span>
+                            </div>
+                            <div className="analysis-line-name">
+                              {detail
+                                ? <ActionLabel
+                                    actionIdx={detail.action_idx}
+                                    display={detail.display ?? null}
+                                    board={displayBoard ?? snapshot?.board_state ?? null}
+                                  />
+                                : 'Waiting for search...'}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+                {analysisPanelTab === 'ANALYSIS' && !showBoardAnalysis && (
+                  <div className="analysis-line placeholder" role="status">Analysis hidden</div>
+                )}
+                {analysisPanelTab === 'MOVES' && (
+                  <div className="analysis-moves-list" role="list">
+                    {allAnalysisMoves.length === 0 ? (
+                      <div className="analysis-line placeholder" role="listitem">Waiting for search...</div>
+                    ) : (
+                      allAnalysisMoves.map((detail) => (
+                        <div
+                          key={`analysis-move-${detail.action_idx}`}
+                          className="analysis-line analysis-line-move-only"
+                          role="listitem"
+                        >
+                          <div className="analysis-line-name">
+                            <ActionLabel
+                              actionIdx={detail.action_idx}
+                              display={detail.display ?? null}
+                              board={displayBoard ?? snapshot?.board_state ?? null}
+                            />
+                          </div>
                         </div>
-                        <div className="analysis-line-name">
-                          {detail
-                            ? <ActionLabel
-                                actionIdx={detail.action_idx}
-                                display={detail.display ?? null}
-                                board={displayBoard ?? snapshot?.board_state ?? null}
-                              />
-                            : 'Waiting for search...'}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="move-log-wrap">
