@@ -101,6 +101,17 @@ class CheckpointDTO(BaseModel):
 class ActionInfoDTO(BaseModel):
     action_idx: int
     label: str
+    display: "ActionDisplayDTO | None" = None
+
+
+class ActionDisplayDTO(BaseModel):
+    kind: Literal["card", "deck", "tokens", "pass", "noble", "unknown"]
+    verb: Literal["BUY", "RESERVE", "TAKE", "RETURN", "PASS", "NOBLE", "UNKNOWN"]
+    card: "CardDTO | None" = None
+    tier: int | None = None
+    token_colors: list[Literal["white", "blue", "green", "red", "black"]] = Field(default_factory=list)
+    token_duplicate: int | None = None
+    noble_slot: int | None = None
 
 
 class MoveLogEntryDTO(BaseModel):
@@ -110,6 +121,7 @@ class MoveLogEntryDTO(BaseModel):
     actor: Literal["P0", "P1"]
     action_idx: int
     label: str
+    display: ActionDisplayDTO | None = None
 
 
 class GameConfigDTO(BaseModel):
@@ -357,6 +369,7 @@ class PlacementHintDTO(BaseModel):
 class ActionVizDTO(BaseModel):
     action_idx: int
     label: str
+    display: ActionDisplayDTO | None = None
     masked: bool
     policy_prob: float
     q_value: float | None = None
@@ -421,10 +434,18 @@ class ReplayStepDTO(BaseModel):
     model_action_details: list[ActionVizDTO] | None = None
 
 
-if hasattr(GameSnapshotDTO, "model_rebuild"):
-    GameSnapshotDTO.model_rebuild()
-else:
-    GameSnapshotDTO.update_forward_refs()
+_FORWARD_REF_MODELS = (
+    ActionDisplayDTO,
+    ActionInfoDTO,
+    MoveLogEntryDTO,
+    ActionVizDTO,
+    GameSnapshotDTO,
+)
+for _model in _FORWARD_REF_MODELS:
+    if hasattr(_model, "model_rebuild"):
+        _model.model_rebuild()
+    else:
+        _model.update_forward_refs()
 
 
 @dataclass
@@ -464,6 +485,7 @@ class MoveLogEntry:
     actor: str
     action_idx: int
     label: str
+    display: ActionDisplayDTO | None = None
 
 
 @dataclass
@@ -475,6 +497,16 @@ class GameEvent:
     slot: int | None = None
     card_id: int | None = None
     noble_id: int | None = None
+
+
+def _append_or_merge_move_log_entry(log: list[MoveLogEntry], entry: MoveLogEntry) -> None:
+    if _is_continuation_action(entry.action_idx) and log and log[-1].actor == entry.actor:
+        prior = log[-1]
+        prior.label = f"{prior.label} + {entry.label}"
+        prior.result_turn_index = entry.result_turn_index
+        prior.result_snapshot_index = entry.result_snapshot_index
+        return
+    log.append(entry)
 
 
 @dataclass
@@ -528,6 +560,56 @@ def _describe_action(action_idx: int) -> str:
     if 66 <= action_idx <= 68:
         return f"CHOOSE noble index {action_idx - 66}"
     return f"UNKNOWN action {action_idx}"
+
+
+def _find_faceup_card(board: BoardStateDTO | None, tier: int, slot: int) -> CardDTO | None:
+    if board is None:
+        return None
+    row = next((item for item in board.tiers if int(item.tier) == int(tier)), None)
+    if row is None:
+        return None
+    return next((card for card in row.cards if int(card.slot if card.slot is not None else -1) == int(slot)), None)
+
+
+def _find_reserved_card(board: BoardStateDTO | None, actor: str, slot: int) -> CardDTO | None:
+    if board is None:
+        return None
+    player = next((item for item in board.players if item.seat == actor), None)
+    if player is None:
+        return None
+    return next((card for card in player.reserved_public if int(card.slot if card.slot is not None else -1) == int(slot)), None)
+
+
+def _build_action_display(action_idx: int, board: BoardStateDTO | None, actor: str | None = None) -> ActionDisplayDTO | None:
+    action_idx = int(action_idx)
+    if 0 <= action_idx <= 11:
+        tier = action_idx // 4 + 1
+        slot = action_idx % 4
+        return ActionDisplayDTO(kind="card", verb="BUY", card=_find_faceup_card(board, tier, slot))
+    if 12 <= action_idx <= 14:
+        return ActionDisplayDTO(kind="card", verb="BUY", card=_find_reserved_card(board, actor or "P0", action_idx - 12))
+    if 15 <= action_idx <= 26:
+        rel = action_idx - 15
+        tier = rel // 4 + 1
+        slot = rel % 4
+        return ActionDisplayDTO(kind="card", verb="RESERVE", card=_find_faceup_card(board, tier, slot))
+    if 27 <= action_idx <= 29:
+        return ActionDisplayDTO(kind="deck", verb="RESERVE", tier=action_idx - 26)
+    if 30 <= action_idx <= 39:
+        return ActionDisplayDTO(kind="tokens", verb="TAKE", token_colors=[_COLOR_NAMES[i] for i in _TAKE3_TRIPLETS[action_idx - 30]])
+    if 40 <= action_idx <= 44:
+        return ActionDisplayDTO(kind="tokens", verb="TAKE", token_colors=[_COLOR_NAMES[action_idx - 40]], token_duplicate=2)
+    if 45 <= action_idx <= 54:
+        return ActionDisplayDTO(kind="tokens", verb="TAKE", token_colors=[_COLOR_NAMES[i] for i in _TAKE2_PAIRS[action_idx - 45]])
+    if 55 <= action_idx <= 59:
+        return ActionDisplayDTO(kind="tokens", verb="TAKE", token_colors=[_COLOR_NAMES[action_idx - 55]])
+    if action_idx == 60:
+        return ActionDisplayDTO(kind="pass", verb="PASS")
+    if 61 <= action_idx <= 65:
+        return ActionDisplayDTO(kind="tokens", verb="RETURN", token_colors=[_COLOR_NAMES[action_idx - 61]])
+    if 66 <= action_idx <= 68:
+        return ActionDisplayDTO(kind="noble", verb="NOBLE", noble_slot=action_idx - 66)
+    return ActionDisplayDTO(kind="unknown", verb="UNKNOWN")
 
 
 def _is_continuation_action(action_idx: int) -> bool:
@@ -650,6 +732,8 @@ def _action_viz_rows(
     mask: np.ndarray,
     policy: np.ndarray,
     selected_action: int,
+    board: BoardStateDTO | None = None,
+    actor: str | None = None,
     q_values: np.ndarray | None = None,
     pv_previews: dict[int, str] | None = None,
 ) -> list[ActionVizDTO]:
@@ -662,6 +746,7 @@ def _action_viz_rows(
             ActionVizDTO(
                 action_idx=int(action_idx),
                 label=_describe_action(action_idx),
+                display=_build_action_display(action_idx, board, actor),
                 masked=not bool(mask[action_idx]),
                 policy_prob=float(policy[action_idx]),
                 q_value=q_value,
@@ -837,6 +922,14 @@ def _observable_state_for_inference(state: dict[str, Any]) -> dict[str, Any]:
                 "bonuses": _canonicalize_token_map(player.get("bonuses")),
                 "points": int(player.get("points", 0)),
                 "reserved_card_ids": list(player.get("reserved_card_ids") or []),
+                "public_reserved_by_slot": [
+                    {
+                        "slot": int(item.get("slot", idx)),
+                        "card_id": int(item.get("card_id", -1)),
+                    }
+                    for idx, item in enumerate(player.get("reserved") or [])
+                    if isinstance(item, dict) and bool(item.get("is_public", True))
+                ],
             }
         )
 
@@ -847,6 +940,27 @@ def _observable_state_for_inference(state: dict[str, Any]) -> dict[str, Any]:
         "players": players,
         "available_noble_ids": list(state.get("available_noble_ids") or []),
     }
+
+
+def _faceup_change_slots(start_state: dict[str, Any], end_state: dict[str, Any]) -> list[tuple[int, int]]:
+    start_rows = start_state.get("faceup_card_ids")
+    end_rows = end_state.get("faceup_card_ids")
+    if not isinstance(start_rows, list) or not isinstance(end_rows, list):
+        return []
+    out: list[tuple[int, int]] = []
+    for tier_idx, (start_row, end_row) in enumerate(zip(start_rows, end_rows), start=1):
+        if not isinstance(start_row, list) or not isinstance(end_row, list):
+            continue
+        for slot_idx, (start_card, end_card) in enumerate(zip(start_row, end_row)):
+            if start_card != end_card:
+                out.append((tier_idx, slot_idx))
+    return out
+
+
+def _observable_transition_for_inference(start_state: dict[str, Any], end_state: dict[str, Any]) -> dict[str, Any]:
+    out = _observable_state_for_inference(end_state)
+    out["faceup_changed_slots"] = _faceup_change_slots(start_state, end_state)
+    return out
 
 
 def _states_equal(lhs: dict[str, Any], rhs: dict[str, Any]) -> bool:
@@ -1263,7 +1377,7 @@ def _decode_board_state(
         )
 
     for slot in sorted(op_pending_slots):
-        if all(int(card.slot or -1) != slot for card in op_reserved):
+        if all(int(card.slot if card.slot is not None else -1) != slot for card in op_reserved):
             op_reserved.append(
                 _private_reserved_placeholder(
                     slot,
@@ -1382,7 +1496,13 @@ def _decode_replay_step(session_id: str, session_path: Path, episode_idx: int, s
     )
     if model_eval is not None:
         model_policy, model_value = model_eval
-        model_action_details = _action_viz_rows(target.mask, model_policy, target.action_selected)
+        model_action_details = _action_viz_rows(
+            target.mask,
+            model_policy,
+            target.action_selected,
+            board_state,
+            _seat_str(int(target.current_player_id)),
+        )
     return ReplayStepDTO(
         session_id=session_id,
         episode_idx=int(target.episode_idx),
@@ -1395,7 +1515,13 @@ def _decode_replay_step(session_id: str, session_path: Path, episode_idx: int, s
         model_value=model_value,
         action_selected=int(target.action_selected),
         board_state=board_state,
-        action_details=_action_viz_rows(target.mask, target.policy, target.action_selected),
+        action_details=_action_viz_rows(
+            target.mask,
+            target.policy,
+            target.action_selected,
+            board_state,
+            _seat_str(int(target.current_player_id)),
+        ),
         model_action_details=model_action_details,
     )
 
@@ -1604,9 +1730,9 @@ class GameManager:
 
         # Fallback for bridge/native hidden-state drift: match on robust
         # observable state features to recover action intent.
-        target_obs = _observable_state_for_inference(end_state)
+        target_obs = _observable_transition_for_inference(start_state, end_state)
         observable_candidates = _matching_sequences(
-            lambda candidate_state: _observable_state_for_inference(candidate_state) == target_obs
+            lambda candidate_state: _observable_transition_for_inference(start_state, candidate_state) == target_obs
         )
 
         if len(observable_candidates) == 1:
@@ -1639,6 +1765,11 @@ class GameManager:
             actor_env = self._ensure_env_locked().clone()
             actor_env.load_state(start_state)
             actor = _seat_str(actor_env.get_state().current_player_id)
+            board_before = _decode_board_state(
+                actor_env.get_state(),
+                turn_index=max(0, int(start_saved.turn_index)),
+                player_seat=actor,
+            )
 
             inferred_actions = self._infer_actions_between_snapshots_locked(start_state, end_state)
             if not inferred_actions:
@@ -1654,7 +1785,8 @@ class GameManager:
                     and int(end_hist_len) == int(start_hist_len)
                 ):
                     continue
-                rebuilt.append(
+                _append_or_merge_move_log_entry(
+                    rebuilt,
                     MoveLogEntry(
                         turn_index=max(0, int(end_saved.turn_index) - 1),
                         result_turn_index=int(end_saved.turn_index),
@@ -1662,14 +1794,16 @@ class GameManager:
                         actor=actor,
                         action_idx=-1,
                         label="INFERRED unknown move",
-                    )
+                        display=None,
+                    ),
                 )
                 continue
 
             start_turn_index = max(0, int(end_saved.turn_index) - len(inferred_actions))
             for offset, inferred in enumerate(inferred_actions):
                 turn_index = start_turn_index + offset
-                rebuilt.append(
+                _append_or_merge_move_log_entry(
+                    rebuilt,
                     MoveLogEntry(
                         turn_index=turn_index,
                         result_turn_index=turn_index + 1,
@@ -1677,7 +1811,8 @@ class GameManager:
                         actor=actor,
                         action_idx=int(inferred),
                         label=_describe_action(int(inferred)),
-                    )
+                        display=_build_action_display(int(inferred), board_before, actor),
+                    ),
                 )
 
         self._move_log = rebuilt
@@ -1770,7 +1905,20 @@ class GameManager:
             status=status,
             player_to_move=_seat_str(step.current_player_id),
             legal_actions=legal_actions,
-            legal_action_details=[ActionInfoDTO(action_idx=a, label=_describe_action(a)) for a in legal_actions],
+            legal_action_details=[
+                ActionInfoDTO(
+                    action_idx=a,
+                    label=_describe_action(a),
+                    display=_build_action_display(a, _decode_board_state(
+                        step,
+                        turn_index=self._turn_index,
+                        player_seat=config.player_seat,
+                        pending_reveals=self._pending_reveals,
+                        hidden_deck_card_ids_by_tier=hidden_deck_card_ids_by_tier,
+                    ), _seat_str(step.current_player_id)),
+                )
+                for a in legal_actions
+            ],
             winner=winner,
             turn_index=self._turn_index,
             current_snapshot_index=(None if self._snapshot_history_index is None else int(self._snapshot_history_index)),
@@ -1782,6 +1930,7 @@ class GameManager:
                     actor=_seat_str(0 if m.actor == "P0" else 1),
                     action_idx=m.action_idx,
                     label=m.label,
+                    display=m.display,
                 )
                 for m in self._move_log
             ],
@@ -1891,11 +2040,19 @@ class GameManager:
     def _has_initial_setup_pending_locked(self) -> bool:
         return any(item.reason in ("initial_setup", "initial_noble_setup") for item in self._pending_reveals)
 
-    def _append_move_locked(self, actor: str, action_idx: int, step_after: StepState) -> None:
+    def _append_move_locked(
+        self,
+        actor: str,
+        action_idx: int,
+        step_after: StepState,
+        *,
+        board_before: BoardStateDTO | None = None,
+    ) -> None:
         action_idx = int(action_idx)
         label = _describe_action(action_idx)
         result_turn_index = self._turn_index + 1
-        self._move_log.append(
+        _append_or_merge_move_log_entry(
+            self._move_log,
             MoveLogEntry(
                 turn_index=self._turn_index,
                 result_turn_index=result_turn_index,
@@ -1903,6 +2060,7 @@ class GameManager:
                 actor=actor,
                 action_idx=action_idx,
                 label=label,
+                display=_build_action_display(action_idx, board_before, actor),
             )
         )
         self._turn_index += 1
@@ -1928,8 +2086,15 @@ class GameManager:
             actor = _seat_str(step.current_player_id)
             if actor != event.actor:
                 raise RuntimeError("Replay actor mismatch")
+            board_before = _decode_board_state(
+                step,
+                turn_index=self._turn_index,
+                player_seat=actor,
+                pending_reveals=self._pending_reveals,
+                hidden_deck_card_ids_by_tier=env.hidden_deck_card_ids_by_tier(),
+            )
             step_after = env.step(int(event.action_idx))
-            self._append_move_locked(actor, int(event.action_idx), step_after)
+            self._append_move_locked(actor, int(event.action_idx), step_after, board_before=board_before)
             return
         if event.kind == "reveal_card":
             if event.tier is None or event.slot is None or event.card_id is None:
@@ -2026,8 +2191,15 @@ class GameManager:
                 raise HTTPException(status_code=400, detail="Action is not legal")
 
             actor = _seat_str(step.current_player_id)
+            board_before = _decode_board_state(
+                step,
+                turn_index=self._turn_index,
+                player_seat=actor,
+                pending_reveals=self._pending_reveals,
+                hidden_deck_card_ids_by_tier=env.hidden_deck_card_ids_by_tier(),
+            )
             step_after = env.step(int(req.action_idx))
-            self._append_move_locked(actor, int(req.action_idx), step_after)
+            self._append_move_locked(actor, int(req.action_idx), step_after, board_before=board_before)
             self._record_event_locked(GameEvent(kind="move", actor=actor, action_idx=int(req.action_idx)))
             snapshot = self._snapshot_locked()
             engine_should_move = (
@@ -2225,10 +2397,19 @@ class GameManager:
                         aggregated_root = accumulated_root_value / float(total_simulations)
                         selected_action_q = float(aggregated_q_values[aggregated_action_idx])
                         selected_action_idx = int(aggregated_action_idx)
+                        search_board = _decode_board_state(
+                            search_step,
+                            turn_index=self._turn_index,
+                            player_seat=_seat_str(search_step.current_player_id),
+                            pending_reveals=self._pending_reveals,
+                            hidden_deck_card_ids_by_tier=env.hidden_deck_card_ids_by_tier(),
+                        )
                         action_details = _action_viz_rows(
                             search_step.mask,
                             aggregated_policy,
                             int(aggregated_action_idx),
+                            search_board,
+                            _seat_str(search_step.current_player_id),
                             aggregated_q_values,
                         )
                         model_action_details = None
@@ -2250,6 +2431,8 @@ class GameManager:
                                     search_step.mask,
                                     model_policy,
                                     int(aggregated_action_idx),
+                                    search_board,
+                                    _seat_str(search_step.current_player_id),
                                 )
 
                         with self._lock:
@@ -2341,8 +2524,15 @@ class GameManager:
                 raise HTTPException(status_code=400, detail="Engine produced illegal action")
 
             actor = _seat_str(step.current_player_id)
+            board_before = _decode_board_state(
+                step,
+                turn_index=self._turn_index,
+                player_seat=actor,
+                pending_reveals=self._pending_reveals,
+                hidden_deck_card_ids_by_tier=env.hidden_deck_card_ids_by_tier(),
+            )
             step_after = env.step(int(job.action_idx))
-            self._append_move_locked(actor, int(job.action_idx), step_after)
+            self._append_move_locked(actor, int(job.action_idx), step_after, board_before=board_before)
             self._record_event_locked(GameEvent(kind="move", actor=actor, action_idx=int(job.action_idx)))
             return self._snapshot_locked()
 

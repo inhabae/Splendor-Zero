@@ -13,6 +13,7 @@ export interface CheckpointDTO {
 export interface ActionInfoDTO {
   action_idx: number;
   label: string;
+  display?: ActionDisplayDTO | null;
 }
 
 export interface MoveLogEntryDTO {
@@ -22,6 +23,7 @@ export interface MoveLogEntryDTO {
   actor: Seat;
   action_idx: number;
   label: string;
+  display?: ActionDisplayDTO | null;
 }
 
 export interface GameEventDTO {
@@ -64,6 +66,16 @@ export interface CardDTO {
   tier?: number;
   slot?: number;
   is_placeholder?: boolean;
+}
+
+export interface ActionDisplayDTO {
+  kind: 'card' | 'deck' | 'tokens' | 'pass' | 'noble' | 'unknown';
+  verb: 'BUY' | 'RESERVE' | 'TAKE' | 'RETURN' | 'PASS' | 'NOBLE' | 'UNKNOWN';
+  card?: CardDTO | null;
+  tier?: number | null;
+  token_colors?: Array<'white' | 'blue' | 'green' | 'red' | 'black'>;
+  token_duplicate?: number | null;
+  noble_slot?: number | null;
 }
 
 export interface NobleDTO {
@@ -213,6 +225,7 @@ export interface PlacementHintDTO {
 export interface ActionVizDTO {
   action_idx: number;
   label: string;
+  display?: ActionDisplayDTO | null;
   masked: boolean;
   policy_prob: number;
   q_value?: number | null;

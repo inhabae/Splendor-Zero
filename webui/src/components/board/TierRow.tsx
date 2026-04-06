@@ -1,16 +1,35 @@
 import { ActionVizDTO, TierRowDTO } from '../../types';
 import { CardView } from './CardView';
 
+export function TierDeckBadge({ tier }: { tier: TierRowDTO }) {
+  return (
+    <div className={`tier-deck-badge tier-deck-badge-${tier.tier}`} aria-label={`Tier ${tier.tier} deck`}>
+      <div className="tier-deck-stack">
+        <div className="tier-deck-face">
+          <div className="tier-deck-pips" aria-hidden="true">
+            {Array.from({ length: tier.tier }, (_, idx) => (
+              <span key={`deck-pip-${tier.tier}-${idx}`} />
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="tier-deck-count">{tier.deck_count < 0 ? '?' : tier.deck_count}</div>
+    </div>
+  );
+}
+
 export function TierRow({
   tier,
   mctsTopAction,
   modelTopAction,
   onCardClick,
+  showDeck = true,
 }: {
   tier: TierRowDTO;
   mctsTopAction?: ActionVizDTO | null;
   modelTopAction?: ActionVizDTO | null;
   onCardClick?: (tier: number, slot: number) => void;
+  showDeck?: boolean;
 }) {
   const mctsTier = mctsTopAction?.placement_hint.zone === 'faceup_card' ? mctsTopAction.placement_hint.tier : undefined;
   const mctsSlot = mctsTopAction?.placement_hint.zone === 'faceup_card' ? mctsTopAction.placement_hint.slot : undefined;
@@ -19,18 +38,7 @@ export function TierRow({
   return (
     <section className="tier-row" aria-label={`Tier ${tier.tier} cards`}>
       <div className="tier-row-inline">
-        <div className={`tier-deck-badge tier-deck-badge-${tier.tier}`} aria-label={`Tier ${tier.tier} deck`}>
-          <div className="tier-deck-stack">
-            <div className="tier-deck-face">
-              <div className="tier-deck-pips" aria-hidden="true">
-                {Array.from({ length: tier.tier }, (_, idx) => (
-                  <span key={`deck-pip-${tier.tier}-${idx}`} />
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className="tier-deck-count">{tier.deck_count < 0 ? '?' : tier.deck_count}</div>
-        </div>
+        {showDeck && <TierDeckBadge tier={tier} />}
         <div className="tier-row-body">
           <div className="tier-cards">
             {tier.cards.length === 0 && <div className="empty-note">No visible cards</div>}

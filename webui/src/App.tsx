@@ -17,7 +17,7 @@ import {
   Seat,
 } from './types';
 import { GameBoard } from './components/board/GameBoard';
-import { ActionLabel } from './components/ActionLabel';
+import { ActionLabel, actionTextLabel } from './components/ActionLabel';
 import { CardView } from './components/board/CardView';
 import { NobleView } from './components/board/NobleView';
 
@@ -148,12 +148,15 @@ function continuationSuffix(index: number): string {
   return out;
 }
 
-function oppositeSeat(seat: Seat): Seat {
-  return seat === 'P0' ? 'P1' : 'P0';
-}
-
 function formatEvalBar(value: number | null | undefined): string {
   return value != null && Number.isFinite(value) ? Math.abs(value).toFixed(2) : '--';
+}
+
+function evalClassFromP1Value(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value === 0) {
+    return 'neutral';
+  }
+  return value > 0 ? 'white-side' : 'black-side';
 }
 
 function topMoveEvalClass(value: number | null | undefined, playerToMove: Seat | null | undefined): string {
@@ -209,6 +212,7 @@ export function App() {
   const [jobStatus, setJobStatus] = useState<EngineJobStatusDTO | null>(null);
   const [uiStatus, setUiStatus] = useState<UiStatus>('IDLE');
   const [liveSaveStatus, setLiveSaveStatus] = useState<LiveSaveStatusDTO | null>(null);
+  const [displayedP1EvalValue, setDisplayedP1EvalValue] = useState<number | null>(null);
   const [deepAnalysisBySnapshot, setDeepAnalysisBySnapshot] = useState<Record<number, DeepAnalysisEntry>>({});
   const [deepAnalysisSearchBySnapshot, setDeepAnalysisSearchBySnapshot] = useState<Record<number, DeepAnalysisSearchResult>>({});
   const [isLoadedPostAnalysisGame, setIsLoadedPostAnalysisGame] = useState(false);
@@ -225,6 +229,8 @@ export function App() {
   const loadInputRef = useRef<HTMLInputElement | null>(null);
   const analysisSettingsRef = useRef<HTMLDivElement | null>(null);
   const moveLogGridRef = useRef<HTMLDivElement | null>(null);
+  const evalAnimationFrameRef = useRef<number | null>(null);
+  const displayedP1EvalRef = useRef<number | null>(null);
   const isSetupLikeView = homeView === 'ANALYSIS';
   const lastLiveSaveUpdatedAtRef = useRef<string | null>(null);
   const lastAutoAnalyzeKeyRef = useRef<string | null>(null);
@@ -274,36 +280,32 @@ export function App() {
   const moveLogDisplayEntries = useMemo<MoveLogDisplayEntry[]>(() => {
     let fullMoveNumber = 1;
     let continuationIndex = 0;
-    let prevLogicalActor: Seat | null = null;
+    let prevActor: Seat | null = null;
 
-    return moveLogEntries.map((move, idx) => {
+    return moveLogEntries.map((move) => {
       const isContinuation = isContinuationAction(move.action_idx);
-      let logicalActor: Seat;
+      let displayActor = move.actor;
 
-      if (idx === 0 || prevLogicalActor == null) {
-        logicalActor = move.actor;
-        continuationIndex = 0;
-      } else if (isContinuation) {
-        // Continuation actions (return/noble choice) stay on same side.
-        logicalActor = prevLogicalActor;
+      if (isContinuation && prevActor != null) {
+        displayActor = prevActor;
         continuationIndex += 1;
+      } else if (isContinuation) {
+        continuationIndex = 1;
       } else {
-        // Any normal action starts the other side's turn.
-        logicalActor = oppositeSeat(prevLogicalActor);
         continuationIndex = 0;
-        if (prevLogicalActor === 'P1' && logicalActor === 'P0') {
-          fullMoveNumber += 1;
-        }
+        fullMoveNumber = move.actor === 'P0'
+          ? Math.max(1, move.result_turn_index)
+          : Math.max(1, move.result_turn_index - 1);
       }
 
       const suffix = continuationSuffix(continuationIndex);
       const base = `${fullMoveNumber}${suffix}`;
-      const notation = logicalActor === 'P0' ? `${base}.` : `${base}...`;
-      prevLogicalActor = logicalActor;
+      const notation = displayActor === 'P0' ? `${base}.` : `${base}...`;
+      prevActor = displayActor;
 
       return {
         ...move,
-        actor: logicalActor,
+        actor: displayActor,
         notation,
         turnLabel: base,
         fullMoveNumber,
@@ -476,6 +478,9 @@ export function App() {
       if (livePollRef.current !== null) {
         window.clearInterval(livePollRef.current);
       }
+      if (evalAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(evalAnimationFrameRef.current);
+      }
     };
   }, []);
 
@@ -602,11 +607,11 @@ export function App() {
   }
 
   function describePendingReveal(reason: GameSnapshotDTO['pending_reveals'][number]['reason']): string {
-    if (reason === 'initial_setup') return 'Initial board setup';
-    if (reason === 'initial_noble_setup') return 'Initial noble setup';
-    if (reason === 'replacement_after_buy') return 'Replacement after buy';
-    if (reason === 'replacement_after_reserve') return 'Replacement after reserve';
-    return 'Reveal reserved deck card';
+    if (reason === 'initial_setup') return 'Setup';
+    if (reason === 'initial_noble_setup') return 'Noble setup';
+    if (reason === 'replacement_after_buy') return 'After buy';
+    if (reason === 'replacement_after_reserve') return 'After reserve';
+    return 'Reserved reveal';
   }
 
   function cardOptionLabel(card: CatalogCardDTO): string {
@@ -1316,7 +1321,7 @@ export function App() {
   function variationMoveLabel(move: VariationMove): string {
     const moveNumber = Math.max(1, move.fullMoveNumber);
     const prefix = move.actor === 'P0' ? `${moveNumber}.` : `${moveNumber}...`;
-    return `${prefix} ${move.label}`;
+    return `${prefix} ${actionTextLabel(move.actionIdx)}`;
   }
 
   function appendVariationEditNode(
@@ -1808,22 +1813,63 @@ export function App() {
   const p1EvalValue = useMemo<number | null>(() => {
     return p1WinningEval(analysisEvalValue, snapshot?.player_to_move ?? null);
   }, [analysisEvalValue, snapshot]);
+  useEffect(() => {
+    displayedP1EvalRef.current = displayedP1EvalValue;
+  }, [displayedP1EvalValue]);
+
+  useEffect(() => {
+    if (p1EvalValue == null || !Number.isFinite(p1EvalValue)) {
+      return;
+    }
+    if (evalAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(evalAnimationFrameRef.current);
+      evalAnimationFrameRef.current = null;
+    }
+    setDisplayedP1EvalValue((current) => {
+      if (current == null || !Number.isFinite(current)) {
+        return p1EvalValue;
+      }
+      return current;
+    });
+    const startValue = displayedP1EvalRef.current != null && Number.isFinite(displayedP1EvalRef.current)
+      ? displayedP1EvalRef.current
+      : p1EvalValue;
+    if (Math.abs(startValue - p1EvalValue) < 0.0001) {
+      setDisplayedP1EvalValue(p1EvalValue);
+      return;
+    }
+    const startedAt = performance.now();
+    const durationMs = 525;
+    const step = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / durationMs);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const nextValue = startValue + (p1EvalValue - startValue) * eased;
+      displayedP1EvalRef.current = nextValue;
+      setDisplayedP1EvalValue(nextValue);
+      if (progress < 1) {
+        evalAnimationFrameRef.current = window.requestAnimationFrame(step);
+      } else {
+        evalAnimationFrameRef.current = null;
+      }
+    };
+    evalAnimationFrameRef.current = window.requestAnimationFrame(step);
+  }, [p1EvalValue]);
   const evalBarPercent = useMemo<number>(() => {
-    if (p1EvalValue == null || !Number.isFinite(p1EvalValue)) {
+    if (displayedP1EvalValue == null || !Number.isFinite(displayedP1EvalValue)) {
       return 50;
     }
-    return Math.max(0, Math.min(100, ((p1EvalValue + 1) / 2) * 100));
-  }, [p1EvalValue]);
+    return Math.max(0, Math.min(100, ((displayedP1EvalValue + 1) / 2) * 100));
+  }, [displayedP1EvalValue]);
   const evalBarTopHeight = useMemo<number>(() => {
-    if (p1EvalValue == null || !Number.isFinite(p1EvalValue)) {
+    if (displayedP1EvalValue == null || !Number.isFinite(displayedP1EvalValue)) {
       return 50;
     }
-    return Math.max(0, Math.min(100, ((p1EvalValue + 1) / 2) * 100));
-  }, [p1EvalValue]);
+    return Math.max(0, Math.min(100, ((displayedP1EvalValue + 1) / 2) * 100));
+  }, [displayedP1EvalValue]);
   const evalBarBottomHeight = 100 - evalBarTopHeight;
   const evalBarValueClass = useMemo<string>(() => {
-    return topMoveEvalClass(analysisEvalValue, snapshot?.player_to_move ?? null);
-  }, [analysisEvalValue, snapshot]);
+    return evalClassFromP1Value(displayedP1EvalValue);
+  }, [displayedP1EvalValue]);
   const topAnalysisMoves = useMemo(() => {
     const details = currentDeepAnalysisSearch?.action_details ?? jobStatus?.result?.action_details ?? [];
     return details
@@ -2176,12 +2222,14 @@ export function App() {
     }
     const entry = deepAnalysisBySnapshot[move.result_snapshot_index];
     if (!entry) {
-      return move.label;
+      return <ActionLabel actionIdx={move.action_idx} display={move.display ?? null} board={displayBoard ?? snapshot?.board_state ?? null} />;
     }
     const categoryClass = entry.category.toLowerCase();
     return (
       <span className="move-log-label-wrap">
-        <span className="move-log-label-main">{move.label}</span>
+        <span className="move-log-label-main">
+          <ActionLabel actionIdx={move.action_idx} display={move.display ?? null} board={displayBoard ?? snapshot?.board_state ?? null} />
+        </span>
         <span className={`deep-analysis-badge ${categoryClass}`}>{deepAnalysisBadgeText(entry)}</span>
       </span>
     );
@@ -2337,9 +2385,7 @@ export function App() {
                     <div className="eval-bar">
                       <div className="eval-bar-top" style={{ height: `${evalBarTopHeight}%` }} />
                       <div className="eval-bar-bottom" style={{ height: `${evalBarBottomHeight}%` }} />
-                      {uiStatus !== 'WAITING_ENGINE' && (
-                        <div className={`eval-bar-value ${evalBarValueClass}`}>{formatEvalBar(analysisEvalValue)}</div>
-                      )}
+                      <div className={`eval-bar-value ${evalBarValueClass}`}>{formatEvalBar(displayedP1EvalValue)}</div>
                     </div>
                   </>
                 )}
@@ -2640,12 +2686,12 @@ export function App() {
       {activeReveal && (
         <section className="reveal-modal-backdrop" onClick={() => setActiveRevealKey(null)}>
           <div className="reveal-modal" onClick={(event) => event.stopPropagation()}>
-            <h3>
+            <h3 className="reveal-modal-title">
               {activeReveal.zone === 'noble'
-                ? `Fill Noble Slot ${activeReveal.slot}`
+                ? `Noble ${activeReveal.slot}`
                 : activeReveal.zone === 'reserved_card'
-                  ? `Reveal ${activeReveal.actor} Reserved Slot ${activeReveal.slot}`
-                  : `Fill Tier ${activeReveal.tier} Slot ${activeReveal.slot}`}
+                  ? `${activeReveal.actor} Reserved ${activeReveal.slot}`
+                  : `Tier ${activeReveal.tier} Slot ${activeReveal.slot}`}
             </h3>
             {activeReveal.reason !== 'initial_setup' && activeReveal.reason !== 'initial_noble_setup' && (
               <p>
