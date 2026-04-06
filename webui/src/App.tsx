@@ -2467,7 +2467,6 @@ export function App() {
       {homeView === 'LIVE' && !snapshot && (
         <section className="panel">
           <h2>Live</h2>
-          <p>Watching the latest bridge save and loading it automatically when it changes.</p>
           <p>{liveSaveStatus?.path ?? 'Waiting for live save path...'}</p>
           <p>{liveSaveStatus?.exists ? `Last update: ${liveSaveStatus.updated_at ?? 'unknown'}` : 'No live save file found yet.'}</p>
         </section>
@@ -2601,7 +2600,6 @@ export function App() {
                 </div>
                 </div>
               )}
-              {homeView === 'LIVE' && <p>Watching {liveSaveStatus?.path ?? 'live save file'}.</p>}
               {uiStatus === 'WAITING_REVEAL' && <p>Waiting for board update before the next move.</p>}
               {jobStatus?.error && <p className="error">Engine error: {jobStatus.error}</p>}
               {homeView === 'LIVE' && (
