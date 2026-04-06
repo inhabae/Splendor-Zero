@@ -60,10 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="If set, require opponent rating >= (your current rating - this gap); overrides --min-opponent-rating when your rating is available",
     )
     parser.add_argument(
-        "--allow-gm",
-        "-allow-gm",
-        action="store_true",
-        help="Use fixed GM gate: ready only when opponent rating is 2000+ (overrides relative gap mode)",
+        "--min-rating",
+        type=int,
+        default=None,
+        help="Use a fixed minimum opponent rating gate; when set, overrides relative gap mode",
     )
     return parser
 
@@ -85,7 +85,7 @@ async def _run_async(args: argparse.Namespace) -> None:
         auto_manage_rooms=bool(args.auto_manage_rooms),
         min_opponent_rating=int(args.min_opponent_rating),
         relative_rating_gap=(None if args.relative_rating_gap is None else int(args.relative_rating_gap)),
-        allow_gm=bool(args.allow_gm),
+        min_rating=(None if args.min_rating is None else int(args.min_rating)),
         artifact_dir=str(args.artifact_dir),
     )
     runner = SpendeeBridgeRunner(config)

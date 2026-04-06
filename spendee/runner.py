@@ -79,7 +79,7 @@ class SpendeeBridgeConfig:
     auto_manage_rooms: bool = False
     min_opponent_rating: int = 1980
     relative_rating_gap: int | None = 150
-    allow_gm: bool = False
+    min_rating: int | None = None
     selectors: SpendeeSelectorConfig = field(default_factory=SpendeeSelectorConfig)
     artifact_dir: str = "nn_artifacts/spendee_bridge"
 
@@ -733,15 +733,19 @@ class SpendeeBridgeRunner:
         return None
 
     async def _kick_low_rated_players(self, page, surface: dict[str, str]) -> tuple[int, bool]:
-        effective_min_rating = (2000 if self.config.allow_gm else int(self.config.min_opponent_rating))
+        effective_min_rating = (
+            int(self.config.min_rating)
+            if self.config.min_rating is not None
+            else int(self.config.min_opponent_rating)
+        )
         kick_debug: dict[str, object] = {
             "href": str(surface.get("href") or ""),
             "title": str(surface.get("title") or ""),
             "meteor": None,
             "meteor_error": None,
             "min_opponent_rating": int(self.config.min_opponent_rating),
+            "min_rating": (None if self.config.min_rating is None else int(self.config.min_rating)),
             "relative_rating_gap": (None if self.config.relative_rating_gap is None else int(self.config.relative_rating_gap)),
-            "allow_gm": bool(self.config.allow_gm),
             "dom_kicked": 0,
             "dom_button_count": 0,
             "result": "init",
@@ -750,12 +754,14 @@ class SpendeeBridgeRunner:
         try:
             raw = await page.evaluate(
                 r"""
-                                async ({ minOpponentRating, relativeRatingGap, allowGM }) => {
+                                async ({ minOpponentRating, relativeRatingGap, minRating }) => {
                                     const out = {
                                         kicked: 0,
                                         roomId: null,
                                         myRating: null,
-                                        effectiveMinOpponentRating: (allowGM ? 2000 : Number(minOpponentRating)),
+                                        effectiveMinOpponentRating: (
+                                            minRating == null ? Number(minOpponentRating) : Number(minRating)
+                                        ),
                                         unknownCandidates: [],
                                         knownCandidates: [],
                                         participants: [],
@@ -857,8 +863,8 @@ class SpendeeBridgeRunner:
                                     const myRating = userRating(me);
                                     out.myRating = myRating;
                                     const gap = (relativeRatingGap == null) ? null : Number(relativeRatingGap);
-                                    if (allowGM) {
-                                        out.effectiveMinOpponentRating = 2000;
+                                    if (minRating != null && Number.isFinite(Number(minRating))) {
+                                        out.effectiveMinOpponentRating = Number(minRating);
                                     } else if (myRating != null && gap != null && Number.isFinite(gap)) {
                                         out.effectiveMinOpponentRating = Math.max(0, Math.floor(Number(myRating) - gap));
                                     } else {
@@ -1120,7 +1126,7 @@ class SpendeeBridgeRunner:
                 {
                     "minOpponentRating": int(self.config.min_opponent_rating),
                     "relativeRatingGap": (None if self.config.relative_rating_gap is None else int(self.config.relative_rating_gap)),
-                    "allowGM": bool(self.config.allow_gm),
+                    "minRating": (None if self.config.min_rating is None else int(self.config.min_rating)),
                 },
             )
             if isinstance(raw, dict):
@@ -1197,7 +1203,7 @@ class SpendeeBridgeRunner:
                 self.logger.write_json("last_room_kick_debug", kick_debug)
                 return 0, True
 
-        if (not self.config.allow_gm) and self.config.relative_rating_gap is not None:
+        if self.config.min_rating is None and self.config.relative_rating_gap is not None:
             fallback_my_rating = self._extract_engine_rating_from_surface(surface)
             if fallback_my_rating is not None:
                 effective_min_rating = max(0, int(fallback_my_rating) - int(self.config.relative_rating_gap))
