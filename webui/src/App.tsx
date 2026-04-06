@@ -1887,12 +1887,11 @@ export function App() {
       .slice(0, 3);
   }, [currentDeepAnalysisSearch, jobStatus]);
   const allAnalysisMoves = useMemo(() => {
-    const details = currentDeepAnalysisSearch?.action_details ?? jobStatus?.result?.action_details ?? [];
+    const details = snapshot?.legal_action_details ?? [];
     return details
-      .filter((detail) => !detail.masked)
       .slice()
       .sort((a, b) => a.action_idx - b.action_idx);
-  }, [currentDeepAnalysisSearch, jobStatus]);
+  }, [snapshot]);
   const displayBoard = useMemo(() => {
     if (!snapshot?.board_state) {
       return null;
@@ -2569,12 +2568,12 @@ export function App() {
                   </div>
                 )}
                 {analysisPanelTab === 'ANALYSIS' && !showBoardAnalysis && (
-                  <div className="analysis-line placeholder" role="status">Analysis hidden</div>
+                  <div className="analysis-line placeholder analysis-panel-empty" role="status">Analysis hidden</div>
                 )}
                 {analysisPanelTab === 'MOVES' && (
                   <div className="analysis-moves-list" role="list">
                     {allAnalysisMoves.length === 0 ? (
-                      <div className="analysis-line placeholder" role="listitem">Waiting for search...</div>
+                      <div className="analysis-line placeholder analysis-panel-empty" role="listitem">Waiting for search...</div>
                     ) : (
                       allAnalysisMoves.map((detail) => (
                         <div

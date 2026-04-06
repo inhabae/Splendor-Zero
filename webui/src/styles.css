@@ -1534,7 +1534,7 @@ button:disabled {
   top: calc(100% + 0.45rem);
   right: 0;
   z-index: 20;
-  min-width: 290px;
+  min-width: 340px;
   padding: 0.7rem;
   border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1555,7 +1555,7 @@ button:disabled {
 
 .analysis-search-row {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 0.35rem;
   align-items: center;
   margin-bottom: 0.45rem;
@@ -1567,10 +1567,19 @@ button:disabled {
   min-height: 32px;
   padding: 0.35rem 0.5rem;
   font-size: 0.8rem;
+  font-family: inherit;
 }
 
 .analysis-search-row input {
   width: 92px;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.analysis-search-row input::-webkit-outer-spin-button,
+.analysis-search-row input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .analysis-lines {
@@ -1605,6 +1614,10 @@ button:disabled {
 }
 
 .analysis-panel-body .analysis-line.placeholder {
+  color: #9aa6bb;
+}
+
+.analysis-panel-body .analysis-panel-empty {
   color: #9aa6bb;
   min-height: 84px;
   display: grid;
