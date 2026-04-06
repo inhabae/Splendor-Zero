@@ -370,7 +370,7 @@ button:disabled {
 }
 
 .board-surface {
-  background: #1c2026;
+  background: #2a2f36;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   padding: 0.5rem;
@@ -447,14 +447,14 @@ button:disabled {
 .player-row.compact {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 0.22rem;
-  margin-bottom: 0.32rem;
+  gap: 0.16rem;
+  margin-bottom: 0.24rem;
 }
 
 .token-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 0.22rem;
+  gap: 0.08rem;
   align-items: start;
 }
 
@@ -528,6 +528,11 @@ button:disabled {
   padding: 0.04rem 0.2rem;
 }
 
+.token-pill.is-zero-count,
+.color-badge.is-zero-count {
+  visibility: hidden;
+}
+
 .color-badge-empty {
   border-color: transparent;
   background: transparent;
@@ -536,8 +541,9 @@ button:disabled {
 
 .reserved-row {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(78px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.25rem;
+  min-height: 112px;
 }
 
 .player-strip-reserved {
@@ -606,6 +612,10 @@ button:disabled {
   min-height: 0;
 }
 
+.nobles-row {
+  padding-top: 0.8rem;
+}
+
 .nobles-grid {
   display: grid;
   grid-template-columns: repeat(3, 112px);
@@ -616,7 +626,7 @@ button:disabled {
 
 .noble-view {
   background: #b8bcc5;
-  border: none;
+  border: 1.5px solid rgba(12, 16, 22, 0.42);
   border-radius: 12px;
   width: 112px;
   height: 112px;
@@ -738,8 +748,8 @@ button:disabled {
 
 .tier-deck-stack {
   position: relative;
-  width: 66px;
-  height: 104px;
+  width: 50px;
+  height: 72px;
 }
 
 .tier-deck-stack::before,
@@ -749,6 +759,8 @@ button:disabled {
   position: absolute;
   inset: 0;
   border-radius: 10px;
+  border: 1.5px solid rgba(12, 16, 22, 0.42);
+  box-sizing: border-box;
 }
 
 .tier-deck-stack::before {
@@ -767,7 +779,7 @@ button:disabled {
   display: grid;
   align-content: end;
   justify-items: center;
-  padding-bottom: 10px;
+  padding-bottom: 30%;
   z-index: 2;
 }
 
@@ -791,12 +803,15 @@ button:disabled {
 
 .tier-deck-pips {
   display: flex;
-  gap: 5px;
+  gap: 0.24rem;
+  width: 100%;
+  justify-content: center;
 }
 
 .tier-deck-pips span {
-  width: 10px;
-  height: 10px;
+  width: clamp(8px, 16%, 11px);
+  height: clamp(8px, 16%, 11px);
+  flex: 0 0 auto;
   border-radius: 999px;
   background: #ffffff;
 }
@@ -825,7 +840,7 @@ button:disabled {
 
 .card-view {
   border-radius: 10px;
-  border: 1px solid rgba(12, 16, 22, 0.42);
+  border: 1.5px solid rgba(12, 16, 22, 0.42);
   padding: 0.2rem;
   color: #111;
   aspect-ratio: 0.72 / 1;
@@ -903,11 +918,11 @@ button:disabled {
   box-shadow: inset 0 0 0 9999px #80808022;
 }
 
-.card-private.card-white { background: color-mix(in srgb, #f4f1e8 72%, #8e8e8e 28%) !important; }
-.card-private.card-blue { background: color-mix(in srgb, #1f3a8a 72%, #8e8e8e 28%) !important; }
-.card-private.card-green { background: color-mix(in srgb, #1f6b4f 72%, #8e8e8e 28%) !important; }
-.card-private.card-red { background: color-mix(in srgb, #9f2f2f 72%, #8e8e8e 28%) !important; }
-.card-private.card-black { background: color-mix(in srgb, #34373c 72%, #8e8e8e 28%) !important; }
+.card-private.card-white { background: color-mix(in srgb, #fffefc 72%, #8e8e8e 28%) !important; }
+.card-private.card-blue { background: color-mix(in srgb, #324fa6 72%, #8e8e8e 28%) !important; }
+.card-private.card-green { background: color-mix(in srgb, #279c71 72%, #8e8e8e 28%) !important; }
+.card-private.card-red { background: color-mix(in srgb, #cc4343 72%, #8e8e8e 28%) !important; }
+.card-private.card-black { background: color-mix(in srgb, #363533 72%, #8e8e8e 28%) !important; }
 
 .overlay-badges {
   display: flex;
@@ -1015,7 +1030,7 @@ button:disabled {
 .token-green { background: #1f6b4f; }
 .card-red,
 .token-red { background: #9f2f2f; }
-.card-black,
+.card-black { background: #363533; }
 .token-black { background: #34373c; }
 .token-gold { background: #d6b35f; }
 
@@ -1810,7 +1825,9 @@ button:disabled {
 }
 
 .secondary-button {
-  background: #efe5cf;
+  background: #202329;
+  color: #eef2fb;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .setup-tier-slot-row {
@@ -1837,14 +1854,29 @@ button:disabled {
 
 .noble-slot-row {
   grid-template-columns: repeat(3, 98px);
+  grid-auto-rows: 98px;
+}
+
+.current-noble-slot-row {
+  display: grid;
+  grid-template-columns: repeat(3, 98px);
+  grid-auto-rows: 98px;
+  gap: 0.25rem;
+  justify-content: start;
+}
+
+.current-noble-slot {
+  width: 98px;
+  height: 98px;
+  display: block;
+  cursor: pointer;
 }
 
 .noble-slot-row .noble-view {
   width: 98px;
-  height: 112px;
+  height: 98px;
   min-height: 0;
-  padding: 0.22rem;
-  border-width: 4px;
+  padding: 0;
 }
 
 .tier-catalog-grid {
@@ -1949,37 +1981,42 @@ button:disabled {
 
 .noble-catalog-option .noble-view {
   width: 98px;
-  height: 112px;
+  height: 98px;
   min-height: 0;
-  padding: 0.22rem;
-  border-width: 4px;
+  padding: 0;
 }
 
 .noble-slot-row .noble-head,
 .noble-catalog-option .noble-head {
-  font-size: 1.7rem;
+  font-size: 1.9rem;
+  top: -0.42rem;
+  left: 0.2rem;
 }
 
 .noble-slot-row .noble-reqs,
 .noble-catalog-option .noble-reqs {
+  grid-template-columns: repeat(2, 30px);
+  grid-auto-rows: 34px;
   gap: 0.14rem;
+  bottom: 0.38rem;
+}
+
+.noble-slot-row .noble-reqs-count-3,
+.noble-catalog-option .noble-reqs-count-3 {
+  width: calc(60px + 0.14rem);
+  height: calc(68px + 0.14rem);
 }
 
 .noble-slot-row .cost-circle,
 .noble-catalog-option .cost-circle {
-  width: 28px;
-  height: 28px;
-  border-width: 1.5px;
+  width: 30px;
+  height: 34px;
+  border-width: 2px;
 }
 
 .noble-slot-row .cost-circle b,
 .noble-catalog-option .cost-circle b {
-  font-size: 0.92rem;
-}
-
-.noble-slot-row .cost-circle small,
-.noble-catalog-option .cost-circle small {
-  font-size: 0.58rem;
+  font-size: 1.04rem;
 }
 
 .noble-slot-row .card-placeholder-mark,

@@ -2656,11 +2656,11 @@ export function App() {
             {activeReveal.zone === 'noble' ? (
               <>
                 {isSetupLikeView && activeReveal.reason === 'initial_noble_setup' && (
-                  <div className="setup-tier-slot-row noble-slot-row">
+                  <div className="current-noble-slot-row noble-slot-row">
                     {activeBoardNobles.map((noble) => (
                       <div
                         key={`setup-noble-slot-${noble.slot}`}
-                        className="setup-tier-slot"
+                        className="current-noble-slot"
                         onClick={() => noble.slot != null && openReveal('noble', 0, noble.slot)}
                       >
                         <NobleView noble={noble} />

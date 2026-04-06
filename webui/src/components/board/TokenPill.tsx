@@ -4,7 +4,7 @@ type TokenKey = keyof TokenCountsDTO;
 
 export function TokenPill({ color, count, showMcts = false, showModel = false }: { color: TokenKey; count: number; showMcts?: boolean; showModel?: boolean }) {
   return (
-    <div className={`token-pill token-${color}`} aria-label={`${color} token count ${count}`}>
+    <div className={`token-pill token-${color} ${count === 0 ? 'is-zero-count' : ''}`} aria-label={`${color} token count ${count}`}>
       <span className="token-pill-count">{count}</span>
     </div>
   );
@@ -12,7 +12,7 @@ export function TokenPill({ color, count, showMcts = false, showModel = false }:
 
 export function ColorBadge({ color, count }: { color: keyof ColorCountsDTO; count: number }) {
   return (
-    <div className={`color-badge token-${color}`} aria-label={`${color} bonus count ${count}`}>
+    <div className={`color-badge token-${color} ${count === 0 ? 'is-zero-count' : ''}`} aria-label={`${color} bonus count ${count}`}>
       <strong>{count}</strong>
     </div>
   );
