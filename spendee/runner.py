@@ -1881,7 +1881,24 @@ class SpendeeBridgeRunner:
                                     continue
                             else:
                                 self._consecutive_unsettled_actions = 0
-                        self._last_action_idx = decision.action_idx
+                        if settled is not None:
+                            previous_observation = self.shadow.last_observation
+                            if previous_observation is not None:
+                                resolved_hidden_cards = self._resolve_hidden_reserved_cards(
+                                    previous=previous_observation,
+                                    current=settled,
+                                )
+                                for seat, slot, card_id in resolved_hidden_cards:
+                                    self._patch_webui_history_hidden_reserved_card(
+                                        seat=seat,
+                                        slot=slot,
+                                        card_id=card_id,
+                                    )
+                            self.shadow.apply_observation(settled, expected_action_idx=decision.action_idx)
+                            self._last_action_idx = None
+                            self._write_webui_save()
+                        else:
+                            self._last_action_idx = decision.action_idx
                     await asyncio.sleep(self.config.poll_interval_sec)
             finally:
                 try:
