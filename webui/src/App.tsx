@@ -582,12 +582,12 @@ const displayedP0EvalRef = useRef<number | null>(null);
 
   function snapshotSearchKey(nextSnapshot: GameSnapshotDTO): string {
     return JSON.stringify({
-      gameId: nextSnapshot.game_id,
+      checkpointId: nextSnapshot.config?.checkpoint_id ?? null,
       status: nextSnapshot.status,
       winner: nextSnapshot.winner,
       turnIndex: nextSnapshot.turn_index,
-      snapshotIndex: nextSnapshot.current_snapshot_index,
       playerToMove: nextSnapshot.player_to_move,
+      boardState: nextSnapshot.board_state ?? null,
       legalActions: nextSnapshot.legal_actions,
       pendingReveals: nextSnapshot.pending_reveals.map((reveal) => ({
         zone: reveal.zone,
@@ -597,7 +597,6 @@ const displayedP0EvalRef = useRef<number | null>(null);
         reason: reveal.reason,
         actionIdx: reveal.action_idx ?? null,
       })),
-      moveLogLength: nextSnapshot.move_log.length,
     });
   }
 
@@ -703,7 +702,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     snapshotOverride?: GameSnapshotDTO | null;
   }): Promise<void> {
     setError(null);
-    const requested = searchSimulations;
+    const requested = homeView === 'LIVE' ? LIVE_SEARCH_MAX_SIMULATIONS : searchSimulations;
     const baseSnapshot = options?.snapshotOverride ?? snapshot;
     const fallback = baseSnapshot?.config?.num_simulations ?? numSimulations;
     const nextNumSimulations =
@@ -713,8 +712,8 @@ const displayedP0EvalRef = useRef<number | null>(null);
     const thinkRequest: Record<string, unknown> = {
       num_simulations: nextNumSimulations,
       search_type: options?.searchTypeOverride ?? searchType,
-      continuous_until_cancel: homeView === 'LIVE',
-      max_total_simulations: homeView === 'LIVE' ? LIVE_SEARCH_MAX_SIMULATIONS : nextNumSimulations,
+      continuous_until_cancel: false,
+      max_total_simulations: nextNumSimulations,
     };
 
     const think = await fetchJSON<EngineThinkResponse>('/api/game/engine-think', {
@@ -2607,7 +2606,9 @@ const displayedP0EvalRef = useRef<number | null>(null);
                   <button
                     type="button"
                     className={`analysis-settings-btn ${showAnalysisSettings ? 'active' : ''}`}
-                    title={`${searchType.toUpperCase()} • ${searchSimulations.toLocaleString()} sims`}
+                    title={homeView === 'LIVE'
+                      ? `${searchType.toUpperCase()} • full ${LIVE_SEARCH_MAX_SIMULATIONS.toLocaleString()} sim search`
+                      : `${searchType.toUpperCase()} • ${searchSimulations.toLocaleString()} sims`}
                     aria-expanded={showAnalysisSettings}
                     aria-haspopup="dialog"
                     onClick={() => setShowAnalysisSettings((value) => !value)}
@@ -2618,7 +2619,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
                   </button>
                   {showAnalysisSettings && (
                     <div className="analysis-settings-popover" role="dialog" aria-label="Analysis settings">
-                      {uiStatus !== 'WAITING_ENGINE' && snapshot.status === 'IN_PROGRESS' && (snapshot.config?.analysis_mode || snapshot.player_to_move !== snapshot.config?.player_seat) && (
+                      {snapshot.status === 'IN_PROGRESS' && (snapshot.config?.analysis_mode || snapshot.player_to_move !== snapshot.config?.player_seat) && (
                         <div className="analysis-settings-section analysis-search-row">
                           <select
                             value={searchType}
@@ -2628,38 +2629,48 @@ const displayedP0EvalRef = useRef<number | null>(null);
                             <option value="mcts">MCTS</option>
                             <option value="ismcts">ISMCTS</option>
                           </select>
-                          <input
-                            type="number"
-                            min={1}
-                            max={LIVE_SEARCH_MAX_SIMULATIONS}
-                            value={searchSimulations}
-                            onChange={(event) => setSearchSimulations(Number(event.target.value))}
-                            aria-label="Search simulations"
-                            title="Search simulations"
-                          />
+                          {homeView !== 'LIVE' && (
+                            <input
+                              type="number"
+                              min={1}
+                              max={LIVE_SEARCH_MAX_SIMULATIONS}
+                              value={searchSimulations}
+                              onChange={(event) => setSearchSimulations(Number(event.target.value))}
+                              aria-label="Search simulations"
+                              title="Search simulations"
+                            />
+                          )}
                           <button
                             onClick={() => {
                               void startEngineThink();
                               setShowAnalysisSettings(false);
                             }}
-                            disabled={searchSimulations < 1}
+                            disabled={(homeView !== 'LIVE' && searchSimulations < 1) || uiStatus === 'WAITING_ENGINE'}
                           >
                             {homeView === 'LIVE' ? 'Analyze Turn' : 'Run Search'}
                           </button>
                         </div>
                       )}
-                      <div className="analysis-settings-section analysis-search-row">
-                        <span>Deep</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={LIVE_SEARCH_MAX_SIMULATIONS}
-                          value={deepAnalysisSimulations}
-                          onChange={(event) => setDeepAnalysisSimulations(Number(event.target.value))}
-                          aria-label="Deep analysis simulations"
-                          title="Deep analysis simulations per move"
-                        />
-                      </div>
+                      {homeView === 'LIVE' && (
+                        <div className="analysis-settings-section analysis-search-row">
+                          <span>Limit</span>
+                          <span>{LIVE_SEARCH_MAX_SIMULATIONS.toLocaleString()} sims</span>
+                        </div>
+                      )}
+                      {homeView !== 'LIVE' && (
+                        <div className="analysis-settings-section analysis-search-row">
+                          <span>Deep</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={LIVE_SEARCH_MAX_SIMULATIONS}
+                            value={deepAnalysisSimulations}
+                            onChange={(event) => setDeepAnalysisSimulations(Number(event.target.value))}
+                            aria-label="Deep analysis simulations"
+                            title="Deep analysis simulations per move"
+                          />
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2669,9 +2680,9 @@ const displayedP0EvalRef = useRef<number | null>(null);
               {jobStatus?.error && <p className="error">Engine error: {jobStatus.error}</p>}
               {homeView === 'LIVE' && (
                 <p>
-                  Live mode keeps refining the current turn in every 400 sim chunks until the board updates or
-                  {' '}500,000 total sims.
-                  {jobStatus?.result?.total_simulations != null && ` Current total: ${jobStatus.result.total_simulations}.`}
+                  Live mode runs one full search up to {LIVE_SEARCH_MAX_SIMULATIONS.toLocaleString()} sims, and the UI polls until the result is ready.
+                  {jobStatus?.status === 'RUNNING' && ' Search in progress.'}
+                  {jobStatus?.result?.total_simulations != null && ` Completed total: ${jobStatus.result.total_simulations}.`}
                 </p>
               )}
               <div className="analysis-panel-body">

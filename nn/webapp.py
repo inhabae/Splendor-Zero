@@ -3043,11 +3043,12 @@ class GameManager:
                 ),
             )
             if using_loaded_history and self._loaded_move_log_full:
-                self._move_log = [
-                    move
-                    for move in self._loaded_move_log_full
-                    if int(move.result_snapshot_index) <= target_index
-                ]
+                # Keep the full observed mainline visible in the UI while
+                # navigating to historical positions from a loaded/live game.
+                # The highlighted/current snapshot logic already determines
+                # which move is active, so truncating the list here only makes
+                # later moves disappear until the next live reload restores them.
+                self._move_log = list(self._loaded_move_log_full)
             else:
                 self._refresh_move_log_from_snapshot_history_locked()
             return self._snapshot_locked()

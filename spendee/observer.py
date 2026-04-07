@@ -390,45 +390,36 @@ def _reserved_slots_from_meteor_payload(
                     )
                     continue
             if record.get("state") == "hidden":
-                if player_index == my_player_index:
-                    slots.append(
-                        ObservedReservedSlot(
-                            slot=slot,
-                            state="visible",
-                            card=_observed_card_from_engine_id(
-                                catalog.spendee_card_index_to_engine(card_index),
-                                catalog,
-                                is_private=True,
-                                spendee_card_index=card_index,
-                            ),
-                        )
-                    )
-                    continue
-                tier_hint = record.get("tier_hint")
+                # Meteor payload already includes the concrete reserved card
+                # index, even when the UI treats the slot as hidden. Preserve
+                # the actual card identity and keep it marked private instead
+                # of downgrading it to a tier-hint-only placeholder.
                 slots.append(
                     ObservedReservedSlot(
                         slot=slot,
-                        state="hidden",
-                        tier_hint=int(tier_hint) if tier_hint is not None else None,
+                        state="visible",
+                        card=_observed_card_from_engine_id(
+                            catalog.spendee_card_index_to_engine(card_index),
+                            catalog,
+                            is_private=True,
+                            spendee_card_index=card_index,
+                        ),
                     )
                 )
                 continue
 
-        if player_index == my_player_index:
-            slots.append(
-                ObservedReservedSlot(
-                    slot=slot,
-                    state="visible",
-                    card=_observed_card_from_engine_id(
-                        catalog.spendee_card_index_to_engine(card_index),
-                        catalog,
-                        is_private=True,
-                        spendee_card_index=card_index,
-                    ),
-                )
+        slots.append(
+            ObservedReservedSlot(
+                slot=slot,
+                state="visible",
+                card=_observed_card_from_engine_id(
+                    catalog.spendee_card_index_to_engine(card_index),
+                    catalog,
+                    is_private=True,
+                    spendee_card_index=card_index,
+                ),
             )
-        else:
-            slots.append(ObservedReservedSlot(slot=slot, state="hidden"))
+        )
     return tuple(slots)
 
 
