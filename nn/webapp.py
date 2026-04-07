@@ -2453,12 +2453,14 @@ class GameManager:
             search_step = search_env.get_state()
             root_player_id = int(search_step.current_player_id)
             forced_step = None
+            forced_turn_switches = False
             if forced_root_action_idx is not None:
                 if continuous_until_cancel:
                     raise HTTPException(status_code=400, detail="Forced-root search does not support continuous mode")
                 if not bool(search_step.mask[forced_root_action_idx]):
                     raise HTTPException(status_code=400, detail="Forced root action is illegal")
                 forced_step = search_env.step(forced_root_action_idx)
+                forced_turn_switches = int(forced_step.current_player_id) != root_player_id
                 search_step = forced_step
 
             # Use determinization seed for consistent searches
@@ -2604,7 +2606,7 @@ class GameManager:
 
                         if forced_root_action_idx is not None:
                             selected_action_idx = int(forced_root_action_idx)
-                            selected_action_q = float(-aggregated_root)
+                            selected_action_q = float(-aggregated_root if forced_turn_switches else aggregated_root)
                             action_details = []
                         else:
                             model_eval = _evaluate_model_replay_state(
