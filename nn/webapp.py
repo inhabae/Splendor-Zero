@@ -1828,6 +1828,36 @@ class GameManager:
                     if 0 <= noble_slot <= 2 and bool(start_step.mask[action_idx]):
                         return [action_idx]
 
+        if bool(start_state.get("phase_flags", {}).get("is_return_phase")):
+            actor = int(start_step.current_player_id)
+            start_players = start_state.get("players", [])
+            end_players = end_state.get("players", [])
+            start_bank = start_state.get("bank", {})
+            end_bank = end_state.get("bank", {})
+            if (
+                isinstance(start_players, list)
+                and isinstance(end_players, list)
+                and 0 <= actor < len(start_players)
+                and 0 <= actor < len(end_players)
+                and isinstance(start_bank, dict)
+                and isinstance(end_bank, dict)
+            ):
+                returned_colors: list[str] = []
+                start_tokens = start_players[actor].get("tokens", {})
+                end_tokens = end_players[actor].get("tokens", {})
+                if isinstance(start_tokens, dict) and isinstance(end_tokens, dict):
+                    for color_idx, color in enumerate(_COLOR_NAMES):
+                        start_player_count = int(start_tokens.get(color, 0))
+                        end_player_count = int(end_tokens.get(color, 0))
+                        start_bank_count = int(start_bank.get(color, 0))
+                        end_bank_count = int(end_bank.get(color, 0))
+                        if end_player_count == start_player_count - 1 and end_bank_count == start_bank_count + 1:
+                            returned_colors.append(color)
+                    if len(returned_colors) == 1:
+                        action_idx = 61 + _COLOR_NAMES.index(returned_colors[0])
+                        if 61 <= action_idx <= 65 and bool(start_step.mask[action_idx]):
+                            return [action_idx]
+
         def _matching_sequences(matcher: Callable[[dict[str, Any]], bool], max_actions: int = 4) -> list[list[int]]:
             matches: list[list[int]] = []
             for first in legal_first:

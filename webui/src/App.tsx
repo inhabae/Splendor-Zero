@@ -702,7 +702,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     snapshotOverride?: GameSnapshotDTO | null;
   }): Promise<void> {
     setError(null);
-    const requested = homeView === 'LIVE' ? LIVE_SEARCH_MAX_SIMULATIONS : searchSimulations;
+    const requested = searchSimulations;
     const baseSnapshot = options?.snapshotOverride ?? snapshot;
     const fallback = baseSnapshot?.config?.num_simulations ?? numSimulations;
     const nextNumSimulations =
@@ -712,8 +712,8 @@ const displayedP0EvalRef = useRef<number | null>(null);
     const thinkRequest: Record<string, unknown> = {
       num_simulations: nextNumSimulations,
       search_type: options?.searchTypeOverride ?? searchType,
-      continuous_until_cancel: false,
-      max_total_simulations: nextNumSimulations,
+      continuous_until_cancel: homeView === 'LIVE',
+      max_total_simulations: homeView === 'LIVE' ? LIVE_SEARCH_MAX_SIMULATIONS : nextNumSimulations,
     };
 
     const think = await fetchJSON<EngineThinkResponse>('/api/game/engine-think', {
@@ -2607,7 +2607,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
                     type="button"
                     className={`analysis-settings-btn ${showAnalysisSettings ? 'active' : ''}`}
                     title={homeView === 'LIVE'
-                      ? `${searchType.toUpperCase()} • full ${LIVE_SEARCH_MAX_SIMULATIONS.toLocaleString()} sim search`
+                      ? `${searchType.toUpperCase()} • publish every ${searchSimulations.toLocaleString()} sims`
                       : `${searchType.toUpperCase()} • ${searchSimulations.toLocaleString()} sims`}
                     aria-expanded={showAnalysisSettings}
                     aria-haspopup="dialog"
@@ -2629,23 +2629,21 @@ const displayedP0EvalRef = useRef<number | null>(null);
                             <option value="mcts">MCTS</option>
                             <option value="ismcts">ISMCTS</option>
                           </select>
-                          {homeView !== 'LIVE' && (
-                            <input
-                              type="number"
-                              min={1}
-                              max={LIVE_SEARCH_MAX_SIMULATIONS}
-                              value={searchSimulations}
-                              onChange={(event) => setSearchSimulations(Number(event.target.value))}
-                              aria-label="Search simulations"
-                              title="Search simulations"
-                            />
-                          )}
+                          <input
+                            type="number"
+                            min={1}
+                            max={LIVE_SEARCH_MAX_SIMULATIONS}
+                            value={searchSimulations}
+                            onChange={(event) => setSearchSimulations(Number(event.target.value))}
+                            aria-label={homeView === 'LIVE' ? 'Intermediate publish simulations' : 'Search simulations'}
+                            title={homeView === 'LIVE' ? 'Publish updated live analysis every N simulations during the same search job' : 'Search simulations'}
+                          />
                           <button
                             onClick={() => {
                               void startEngineThink();
                               setShowAnalysisSettings(false);
                             }}
-                            disabled={(homeView !== 'LIVE' && searchSimulations < 1) || uiStatus === 'WAITING_ENGINE'}
+                            disabled={searchSimulations < 1 || uiStatus === 'WAITING_ENGINE'}
                           >
                             {homeView === 'LIVE' ? 'Analyze Turn' : 'Run Search'}
                           </button>
@@ -2680,9 +2678,9 @@ const displayedP0EvalRef = useRef<number | null>(null);
               {jobStatus?.error && <p className="error">Engine error: {jobStatus.error}</p>}
               {homeView === 'LIVE' && (
                 <p>
-                  Live mode runs one full search up to {LIVE_SEARCH_MAX_SIMULATIONS.toLocaleString()} sims, and the UI polls until the result is ready.
+                  Live mode runs one search job up to {LIVE_SEARCH_MAX_SIMULATIONS.toLocaleString()} sims and publishes updated analysis every {searchSimulations.toLocaleString()} sims.
                   {jobStatus?.status === 'RUNNING' && ' Search in progress.'}
-                  {jobStatus?.result?.total_simulations != null && ` Completed total: ${jobStatus.result.total_simulations}.`}
+                  {jobStatus?.result?.total_simulations != null && ` Current total: ${jobStatus.result.total_simulations}.`}
                 </p>
               )}
               <div className="analysis-panel-body">
