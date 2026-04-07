@@ -29,7 +29,7 @@ const COLOR_ORDER: CatalogCardDTO['bonus_color'][] = ['white', 'blue', 'green', 
 const POLL_MS = 400;
 const LIVE_POLL_MS = 1000;
 const LIVE_SEARCH_MAX_SIMULATIONS = 500_000;
-const DEEP_ANALYSIS_SIMULATIONS = 50_000;
+const DEFAULT_DEEP_ANALYSIS_SIMULATIONS = 50_000;
 
 function isContinuationAction(actionIdx: number): boolean {
   return actionIdx >= 61 && actionIdx <= 68;
@@ -94,6 +94,10 @@ interface DeepAnalysisEntry {
 }
 
 type DeepAnalysisSearchResult = NonNullable<EngineJobStatusDTO['result']>;
+
+function moveAnalysisKey(move: Pick<MoveLogEntryDTO, 'result_snapshot_index' | 'turn_index' | 'actor' | 'action_idx'>): string {
+  return `${move.result_snapshot_index}:${move.turn_index}:${move.actor}:${move.action_idx}`;
+}
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -160,35 +164,38 @@ function evalClassFromP1Value(value: number | null | undefined): string {
   return value > 0 ? 'white-side' : 'black-side';
 }
 
-function topMoveEvalClass(value: number | null | undefined, playerToMove: Seat | null | undefined): string {
-  if (value == null || !Number.isFinite(value) || playerToMove == null || value === 0) {
+function topMoveEvalClass(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value === 0) {
     return 'neutral';
   }
-  const p1Winning = (playerToMove === 'P0' && value > 0) || (playerToMove === 'P1' && value < 0);
-  return p1Winning ? 'white-side' : 'black-side';
+  return value > 0 ? 'white-side' : 'black-side';
 }
 
-function formatTopMoveEval(value: number | null | undefined, playerToMove: Seat | null | undefined): string {
-  if (value == null || !Number.isFinite(value) || playerToMove == null) {
+function formatTopMoveEval(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) {
     return '--';
   }
-  const p1Winning = (playerToMove === 'P0' && value > 0) || (playerToMove === 'P1' && value < 0);
   const magnitude = Math.abs(value).toFixed(2);
-  return p1Winning ? `+${magnitude}` : `-${magnitude}`;
+  return value > 0 ? `+${magnitude}` : `-${magnitude}`;
 }
 
 function isP1Winning(value: number | null | undefined, playerToMove: Seat | null | undefined): boolean | null {
   if (value == null || !Number.isFinite(value) || playerToMove == null || value === 0) {
     return null;
   }
-  return (playerToMove === 'P0' && value > 0) || (playerToMove === 'P1' && value < 0);
+  return (playerToMove === 'P1' && value > 0) || (playerToMove === 'P0' && value < 0);
 }
 
 function p1WinningEval(value: number | null | undefined, playerToMove: Seat | null | undefined): number | null {
   if (value == null || !Number.isFinite(value) || playerToMove == null) {
     return null;
   }
-  return playerToMove === 'P0' ? value : -value;
+  return playerToMove === 'P1' ? value : -value;
+}
+
+function p0WinningEval(value: number | null | undefined, playerToMove: Seat | null | undefined): number | null {
+  const p1Value = p1WinningEval(value, playerToMove);
+  return p1Value == null ? null : -p1Value;
 }
 
 export function App() {
@@ -198,6 +205,7 @@ export function App() {
   const [checkpointId, setCheckpointId] = useState('');
   const [numSimulations] = useState(400);
   const [searchSimulations, setSearchSimulations] = useState(400);
+  const [deepAnalysisSimulations, setDeepAnalysisSimulations] = useState(DEFAULT_DEEP_ANALYSIS_SIMULATIONS);
   const [searchType, setSearchType] = useState<SearchType>('mcts');
   const [playerSeat] = useState<Seat>('P0');
   const [seed] = useState('');
@@ -213,10 +221,10 @@ export function App() {
   const [jobStatus, setJobStatus] = useState<EngineJobStatusDTO | null>(null);
   const [uiStatus, setUiStatus] = useState<UiStatus>('IDLE');
   const [liveSaveStatus, setLiveSaveStatus] = useState<LiveSaveStatusDTO | null>(null);
-  const [displayedP1EvalValue, setDisplayedP1EvalValue] = useState<number | null>(null);
+const [displayedP0EvalValue, setDisplayedP0EvalValue] = useState<number | null>(null);
   const [analysisPanelTab, setAnalysisPanelTab] = useState<AnalysisPanelTab>('ANALYSIS');
-  const [deepAnalysisBySnapshot, setDeepAnalysisBySnapshot] = useState<Record<number, DeepAnalysisEntry>>({});
-  const [deepAnalysisSearchBySnapshot, setDeepAnalysisSearchBySnapshot] = useState<Record<number, DeepAnalysisSearchResult>>({});
+  const [deepAnalysisBySnapshot, setDeepAnalysisBySnapshot] = useState<Record<string, DeepAnalysisEntry>>({});
+  const [deepAnalysisSearchBySnapshot, setDeepAnalysisSearchBySnapshot] = useState<Record<string, DeepAnalysisSearchResult>>({});
   const [isLoadedPostAnalysisGame, setIsLoadedPostAnalysisGame] = useState(false);
   const [isDeepAnalysisRunning, setIsDeepAnalysisRunning] = useState(false);
   const [deepAnalysisProgress, setDeepAnalysisProgress] = useState<{ done: number; total: number } | null>(null);
@@ -232,7 +240,7 @@ export function App() {
   const analysisSettingsRef = useRef<HTMLDivElement | null>(null);
   const moveLogGridRef = useRef<HTMLDivElement | null>(null);
   const evalAnimationFrameRef = useRef<number | null>(null);
-  const displayedP1EvalRef = useRef<number | null>(null);
+const displayedP0EvalRef = useRef<number | null>(null);
   const isSetupLikeView = homeView === 'ANALYSIS';
   const lastLiveSaveUpdatedAtRef = useRef<string | null>(null);
   const lastAutoAnalyzeKeyRef = useRef<string | null>(null);
@@ -580,7 +588,7 @@ export function App() {
   async function handleSnapshotUpdate(
     nextSnapshot: GameSnapshotDTO,
     engineShouldMove = false,
-    deepSearchOverride: Record<number, DeepAnalysisSearchResult> | null = null,
+    deepSearchOverride: Record<string, DeepAnalysisSearchResult> | null = null,
     suppressAutoAnalyze = false,
   ): Promise<void> {
     clearPolling();
@@ -875,12 +883,16 @@ export function App() {
     return entry.category === 'Mistake' || entry.category === 'Blunder';
   }
 
-  async function runSingleDeepAnalysis(simulations: number, forcedRootActionIdx?: number): Promise<EngineJobStatusDTO> {
+  async function runSingleDeepAnalysis(
+    simulations: number,
+    forcedRootActionIdx?: number,
+    searchTypeOverride?: SearchType,
+  ): Promise<EngineJobStatusDTO> {
     const think = await fetchJSON<EngineThinkResponse>('/api/game/engine-think', {
       method: 'POST',
       body: JSON.stringify({
         num_simulations: simulations,
-        search_type: 'mcts',
+        search_type: searchTypeOverride ?? searchType,
         continuous_until_cancel: false,
         max_total_simulations: simulations,
         ...(forcedRootActionIdx != null ? { forced_root_action_idx: forcedRootActionIdx } : {}),
@@ -899,7 +911,7 @@ export function App() {
   }
 
   async function onRunDeepAnalysis(): Promise<void> {
-    if (!snapshot || moveLogEntries.length === 0 || isDeepAnalysisRunning) {
+    if (!snapshot || moveLogEntries.length === 0 || isDeepAnalysisRunning || deepAnalysisSimulations < 1) {
       return;
     }
 
@@ -920,31 +932,47 @@ export function App() {
     try {
       for (let idx = 0; idx < targets.length; idx += 1) {
         const move = targets[idx];
+        const moveKey = moveAnalysisKey(move);
         const beforeSnapshotIndex = Math.max(0, move.result_snapshot_index - 1);
         await fetchJSON<GameSnapshotDTO>('/api/game/jump-to-snapshot', {
           method: 'POST',
           body: JSON.stringify({ snapshot_index: beforeSnapshotIndex }),
         });
-        const status = await runSingleDeepAnalysis(DEEP_ANALYSIS_SIMULATIONS);
+        const prerequisiteMoves = targets.slice(0, idx).filter((candidate) =>
+          candidate.result_snapshot_index === move.result_snapshot_index,
+        );
+        for (const prerequisite of prerequisiteMoves) {
+          await fetchJSON<PlayerMoveResponse>('/api/game/player-move', {
+            method: 'POST',
+            body: JSON.stringify({ action_idx: prerequisite.action_idx }),
+          });
+        }
+        const status = await runSingleDeepAnalysis(deepAnalysisSimulations, undefined, searchType);
         const regularResult = status.result;
         const bestActionIdx = regularResult?.action_idx ?? null;
         const bestQ = regularResult?.selected_action_q ?? null;
-        let playedQ = bestQ;
+        const regularPlayedQ = regularResult?.action_details.find((detail) => detail.action_idx === move.action_idx)?.q_value ?? null;
+        let playedQ = regularPlayedQ;
         if (bestActionIdx == null || bestQ == null) {
           playedQ = null;
-        } else if (move.action_idx !== bestActionIdx) {
-          const forcedStatus = await runSingleDeepAnalysis(DEEP_ANALYSIS_SIMULATIONS, move.action_idx);
+        } else if (move.action_idx === bestActionIdx) {
+          playedQ = regularPlayedQ ?? bestQ;
+        } else {
+          const forcedStatus = await runSingleDeepAnalysis(deepAnalysisSimulations, move.action_idx, searchType);
           playedQ = forcedStatus.result?.selected_action_q ?? null;
         }
         const classified = classifyDeepAnalysisFromSearch(move.action_idx, bestActionIdx, bestQ, playedQ);
-        setDeepAnalysisBySnapshot((prev) => ({ ...prev, [move.result_snapshot_index]: classified }));
+        setDeepAnalysisBySnapshot((prev) => ({ ...prev, [moveKey]: classified }));
         if (regularResult != null) {
           setDeepAnalysisSearchBySnapshot((prev) => {
             const result = regularResult as DeepAnalysisSearchResult;
             const next = {
               ...prev,
-              [beforeSnapshotIndex]: result,
+              [moveKey]: result,
             };
+            if (!Object.prototype.hasOwnProperty.call(next, String(beforeSnapshotIndex))) {
+              next[String(beforeSnapshotIndex)] = result;
+            }
             return next;
           });
         }
@@ -958,12 +986,10 @@ export function App() {
           method: 'POST',
           body: JSON.stringify({ snapshot_index: startSnapshotIndex }),
         });
-        setSnapshot(restoredSnapshot);
-        setUiStatus(deriveUiStatus(restoredSnapshot));
+        await handleSnapshotUpdate(restoredSnapshot);
       } catch {
         // Keep current state if restore fails.
       }
-      setJobStatus(null);
       setIsDeepAnalysisRunning(false);
       setDeepAnalysisProgress(null);
     }
@@ -1652,12 +1678,8 @@ export function App() {
       const savedWithAnalysis: SavedGameWithDeepAnalysisDTO = {
         ...saved,
         deep_analysis: {
-          move_categories_by_snapshot: Object.fromEntries(
-            Object.entries(deepAnalysisBySnapshot).map(([key, value]) => [String(key), value]),
-          ),
-          search_by_snapshot: Object.fromEntries(
-            Object.entries(deepAnalysisSearchBySnapshot).map(([key, value]) => [String(key), value]),
-          ),
+          move_categories_by_snapshot: { ...deepAnalysisBySnapshot },
+          search_by_snapshot: { ...deepAnalysisSearchBySnapshot },
         },
       };
       const blob = new Blob([JSON.stringify(savedWithAnalysis, null, 2)], { type: 'application/json' });
@@ -1704,19 +1726,17 @@ export function App() {
     try {
       const raw = await file.text();
       const saved = JSON.parse(raw) as SavedGameWithDeepAnalysisDTO;
-      const restoredCategories: Record<number, DeepAnalysisEntry> = {};
-      const restoredSearch: Record<number, DeepAnalysisSearchResult> = {};
+      const restoredCategories: Record<string, DeepAnalysisEntry> = {};
+      const restoredSearch: Record<string, DeepAnalysisSearchResult> = {};
       if (saved.deep_analysis) {
         for (const [key, value] of Object.entries(saved.deep_analysis.move_categories_by_snapshot ?? {})) {
-          const idx = Number(key);
-          if (Number.isFinite(idx) && value != null) {
-            restoredCategories[idx] = value as DeepAnalysisEntry;
+          if (value != null) {
+            restoredCategories[key] = value as DeepAnalysisEntry;
           }
         }
         for (const [key, value] of Object.entries(saved.deep_analysis.search_by_snapshot ?? {})) {
-          const idx = Number(key);
-          if (Number.isFinite(idx) && value != null) {
-            restoredSearch[idx] = value as DeepAnalysisSearchResult;
+          if (value != null) {
+            restoredSearch[key] = value as DeepAnalysisSearchResult;
           }
         }
       }
@@ -1865,47 +1885,51 @@ export function App() {
     if (!currentMainlineMove) {
       return null;
     }
-    return deepAnalysisBySnapshot[currentMainlineMove.result_snapshot_index] ?? null;
+    return deepAnalysisBySnapshot[moveAnalysisKey(currentMainlineMove)]
+      ?? deepAnalysisBySnapshot[String(currentMainlineMove.result_snapshot_index)]
+      ?? null;
   }, [currentMainlineMove, deepAnalysisBySnapshot]);
   const currentDeepAnalysisSearch = useMemo(() => {
-    return deepAnalysisSearchBySnapshot[currentSnapshotIndex] ?? null;
+    return deepAnalysisSearchBySnapshot[String(currentSnapshotIndex)] ?? null;
   }, [currentSnapshotIndex, deepAnalysisSearchBySnapshot]);
+  const preferredAnalysisResult = useMemo<DeepAnalysisSearchResult | EngineJobStatusDTO['result'] | null>(() => {
+    return jobStatus?.result ?? currentDeepAnalysisSearch ?? null;
+  }, [jobStatus, currentDeepAnalysisSearch]);
   const analysisEvalValue = useMemo<number | null>(() => {
     if (homeView === 'ANALYSIS') {
-      return currentDeepAnalysisEntry?.bestQ
-        ?? currentDeepAnalysisSearch?.selected_action_q
-        ?? currentDeepAnalysisSearch?.root_value
-        ?? jobStatus?.result?.root_value
+      return preferredAnalysisResult?.selected_action_q
+        ?? preferredAnalysisResult?.root_value
+        ?? currentDeepAnalysisEntry?.bestQ
         ?? null;
     }
     return jobStatus?.result?.root_value ?? null;
-  }, [homeView, currentDeepAnalysisEntry, currentDeepAnalysisSearch, jobStatus]);
-  const p1EvalValue = useMemo<number | null>(() => {
-    return p1WinningEval(analysisEvalValue, snapshot?.player_to_move ?? null);
+  }, [homeView, currentDeepAnalysisEntry, preferredAnalysisResult, jobStatus]);
+  const p0EvalValue = useMemo<number | null>(() => {
+    return p0WinningEval(analysisEvalValue, snapshot?.player_to_move ?? null);
   }, [analysisEvalValue, snapshot]);
   useEffect(() => {
-    displayedP1EvalRef.current = displayedP1EvalValue;
-  }, [displayedP1EvalValue]);
+    displayedP0EvalRef.current = displayedP0EvalValue;
+  }, [displayedP0EvalValue]);
 
   useEffect(() => {
-    if (p1EvalValue == null || !Number.isFinite(p1EvalValue)) {
+    if (p0EvalValue == null || !Number.isFinite(p0EvalValue)) {
       return;
     }
     if (evalAnimationFrameRef.current !== null) {
       window.cancelAnimationFrame(evalAnimationFrameRef.current);
       evalAnimationFrameRef.current = null;
     }
-    setDisplayedP1EvalValue((current) => {
+    setDisplayedP0EvalValue((current) => {
       if (current == null || !Number.isFinite(current)) {
-        return p1EvalValue;
+        return p0EvalValue;
       }
       return current;
     });
-    const startValue = displayedP1EvalRef.current != null && Number.isFinite(displayedP1EvalRef.current)
-      ? displayedP1EvalRef.current
-      : p1EvalValue;
-    if (Math.abs(startValue - p1EvalValue) < 0.0001) {
-      setDisplayedP1EvalValue(p1EvalValue);
+    const startValue = displayedP0EvalRef.current != null && Number.isFinite(displayedP0EvalRef.current)
+      ? displayedP0EvalRef.current
+      : p0EvalValue;
+    if (Math.abs(startValue - p0EvalValue) < 0.0001) {
+      setDisplayedP0EvalValue(p0EvalValue);
       return;
     }
     const startedAt = performance.now();
@@ -1913,9 +1937,9 @@ export function App() {
     const step = (now: number) => {
       const progress = Math.min(1, (now - startedAt) / durationMs);
       const eased = 1 - Math.pow(1 - progress, 3);
-      const nextValue = startValue + (p1EvalValue - startValue) * eased;
-      displayedP1EvalRef.current = nextValue;
-      setDisplayedP1EvalValue(nextValue);
+      const nextValue = startValue + (p0EvalValue - startValue) * eased;
+      displayedP0EvalRef.current = nextValue;
+      setDisplayedP0EvalValue(nextValue);
       if (progress < 1) {
         evalAnimationFrameRef.current = window.requestAnimationFrame(step);
       } else {
@@ -1923,25 +1947,25 @@ export function App() {
       }
     };
     evalAnimationFrameRef.current = window.requestAnimationFrame(step);
-  }, [p1EvalValue]);
+  }, [p0EvalValue]);
   const evalBarPercent = useMemo<number>(() => {
-    if (displayedP1EvalValue == null || !Number.isFinite(displayedP1EvalValue)) {
+    if (displayedP0EvalValue == null || !Number.isFinite(displayedP0EvalValue)) {
       return 50;
     }
-    return Math.max(0, Math.min(100, ((displayedP1EvalValue + 1) / 2) * 100));
-  }, [displayedP1EvalValue]);
+    return Math.max(0, Math.min(100, ((displayedP0EvalValue + 1) / 2) * 100));
+  }, [displayedP0EvalValue]);
   const evalBarTopHeight = useMemo<number>(() => {
-    if (displayedP1EvalValue == null || !Number.isFinite(displayedP1EvalValue)) {
+    if (displayedP0EvalValue == null || !Number.isFinite(displayedP0EvalValue)) {
       return 50;
     }
-    return Math.max(0, Math.min(100, ((displayedP1EvalValue + 1) / 2) * 100));
-  }, [displayedP1EvalValue]);
+    return Math.max(0, Math.min(100, ((displayedP0EvalValue + 1) / 2) * 100));
+  }, [displayedP0EvalValue]);
   const evalBarBottomHeight = 100 - evalBarTopHeight;
   const evalBarValueClass = useMemo<string>(() => {
-    return evalClassFromP1Value(displayedP1EvalValue);
-  }, [displayedP1EvalValue]);
+    return topMoveEvalClass(displayedP0EvalValue);
+  }, [displayedP0EvalValue]);
   const topAnalysisMoves = useMemo(() => {
-    const details = currentDeepAnalysisSearch?.action_details ?? jobStatus?.result?.action_details ?? [];
+    const details = preferredAnalysisResult?.action_details ?? [];
     return details
       .filter((detail) => !detail.masked)
       .slice()
@@ -1950,14 +1974,14 @@ export function App() {
         return a.action_idx - b.action_idx;
       })
       .slice(0, 3);
-  }, [currentDeepAnalysisSearch, jobStatus]);
+  }, [preferredAnalysisResult]);
   const playedAnalysisMove = useMemo(() => {
     if (!currentDeepAnalysisEntry) {
       return null;
     }
-    const details = currentDeepAnalysisSearch?.action_details ?? jobStatus?.result?.action_details ?? [];
+    const details = preferredAnalysisResult?.action_details ?? [];
     return details.find((detail) => detail.action_idx === currentDeepAnalysisEntry.playedActionIdx) ?? null;
-  }, [currentDeepAnalysisEntry, currentDeepAnalysisSearch, jobStatus]);
+  }, [currentDeepAnalysisEntry, preferredAnalysisResult]);
   const allAnalysisMoves = useMemo(() => {
     const details = snapshot?.legal_action_details ?? [];
     return details
@@ -2316,7 +2340,8 @@ export function App() {
     if (!move) {
       return '-';
     }
-    const entry = deepAnalysisBySnapshot[move.result_snapshot_index];
+    const entry = deepAnalysisBySnapshot[moveAnalysisKey(move)]
+      ?? deepAnalysisBySnapshot[String(move.result_snapshot_index)];
     if (!entry || !shouldShowDeepAnalysisBadge(entry)) {
       return renderMoveContent(move);
     }
@@ -2355,8 +2380,8 @@ export function App() {
                   <button
                     type="button"
                     onClick={() => void onRunDeepAnalysis()}
-                    disabled={isDeepAnalysisRunning || moveLogEntries.length === 0}
-                    title={`Run deep analysis across all logged moves (${DEEP_ANALYSIS_SIMULATIONS.toLocaleString()} sims per move)`}
+                    disabled={isDeepAnalysisRunning || moveLogEntries.length === 0 || deepAnalysisSimulations < 1}
+                    title={`Run deep analysis across all logged moves (${deepAnalysisSimulations.toLocaleString()} sims per move)`}
                   >
                     {isDeepAnalysisRunning ? 'Running Deep Analysis...' : 'Run Deep Analysis'}
                   </button>
@@ -2486,7 +2511,7 @@ export function App() {
                     <div className="eval-bar">
                       <div className="eval-bar-top" style={{ height: `${evalBarTopHeight}%` }} />
                       <div className="eval-bar-bottom" style={{ height: `${evalBarBottomHeight}%` }} />
-                      <div className={`eval-bar-value ${evalBarValueClass}`}>{formatEvalBar(displayedP1EvalValue)}</div>
+                      <div className={`eval-bar-value ${evalBarValueClass}`}>{formatEvalBar(displayedP0EvalValue)}</div>
                     </div>
                   </>
                 )}
@@ -2595,6 +2620,18 @@ export function App() {
                           </button>
                         </div>
                       )}
+                      <div className="analysis-settings-section analysis-search-row">
+                        <span>Deep</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={LIVE_SEARCH_MAX_SIMULATIONS}
+                          value={deepAnalysisSimulations}
+                          onChange={(event) => setDeepAnalysisSimulations(Number(event.target.value))}
+                          aria-label="Deep analysis simulations"
+                          title="Deep analysis simulations per move"
+                        />
+                      </div>
                     </div>
                   )}
                 </div>
@@ -2619,11 +2656,12 @@ export function App() {
                             <div className="analysis-line-stats">
                               <span
                                 className={`analysis-line-q ${topMoveEvalClass(
-                                  currentDeepAnalysisEntry.playedQ,
-                                  snapshot?.player_to_move ?? null,
+                                  p0WinningEval(currentDeepAnalysisEntry.playedQ, snapshot?.player_to_move ?? null),
                                 )}`}
                               >
-                                {formatTopMoveEval(currentDeepAnalysisEntry.playedQ, snapshot?.player_to_move ?? null)}
+                                {formatTopMoveEval(
+                                  p0WinningEval(currentDeepAnalysisEntry.playedQ, snapshot?.player_to_move ?? null),
+                                )}
                               </span>
                               <span className="analysis-line-visit analysis-line-visit-placeholder" aria-hidden="true">
                                 --
@@ -2646,7 +2684,10 @@ export function App() {
                       <div className="analysis-section-header">Top moves</div>
                       {Array.from({ length: 3 }, (_, index) => {
                         const detail = topAnalysisMoves[index] ?? null;
-                        const evalClass = topMoveEvalClass(detail?.q_value ?? null, snapshot?.player_to_move ?? null);
+                        const absoluteEval = detail
+                          ? p0WinningEval(detail.q_value, snapshot?.player_to_move ?? null)
+                          : null;
+                        const evalClass = topMoveEvalClass(absoluteEval);
                         return (
                           <button
                             key={detail ? `analysis-line-${detail.action_idx}` : `analysis-line-placeholder-${index}`}
@@ -2662,7 +2703,7 @@ export function App() {
                           >
                             <div className="analysis-line-stats">
                               <span className={`analysis-line-q ${evalClass}`}>
-                                {detail ? formatTopMoveEval(detail.q_value, snapshot?.player_to_move ?? null) : '--'}
+                                {detail ? formatTopMoveEval(absoluteEval) : '--'}
                               </span>
                               <span className="analysis-line-visit">
                                 {detail ? `${(detail.policy_prob * 100).toFixed(1)}%` : '--'}
