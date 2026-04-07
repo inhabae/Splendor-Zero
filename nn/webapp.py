@@ -1994,19 +1994,16 @@ class GameManager:
                     return [action_idx]
         return None
 
-    def _refresh_move_log_from_snapshot_history_locked(self) -> None:
-        if self._snapshot_history_index is None:
-            return
-        if not self._snapshot_history:
-            self._move_log = []
-            return
-
-        upto = int(self._snapshot_history_index)
+    def _rebuild_move_log_from_snapshot_history_locked(
+        self,
+        history: list[SavedStateDTO],
+        upto: int,
+    ) -> list[MoveLogEntry]:
         rebuilt: list[MoveLogEntry] = []
 
         for idx in range(1, upto + 1):
-            start_saved = self._snapshot_history[idx - 1]
-            end_saved = self._snapshot_history[idx]
+            start_saved = history[idx - 1]
+            end_saved = history[idx]
             start_state = start_saved.exported_state
             end_state = end_saved.exported_state
 
@@ -2065,7 +2062,51 @@ class GameManager:
                     )
                 )
 
-        self._move_log = rebuilt
+        return rebuilt
+
+    def _refresh_move_log_from_snapshot_history_locked(self) -> None:
+        if self._snapshot_history_index is None:
+            return
+        if not self._snapshot_history:
+            self._move_log = []
+            return
+
+        upto = int(self._snapshot_history_index)
+        self._move_log = self._rebuild_move_log_from_snapshot_history_locked(self._snapshot_history, upto)
+
+    def _set_visible_full_snapshot_history_move_log_locked(
+        self,
+        history: list[SavedStateDTO],
+    ) -> None:
+        if not history:
+            self._move_log = []
+            return
+        self._move_log = self._rebuild_move_log_from_snapshot_history_locked(history, len(history) - 1)
+
+    def _restore_snapshot_history_position_locked(
+        self,
+        history: list[SavedStateDTO],
+        target_index: int,
+    ) -> None:
+        self._snapshot_history = list(history)
+        self._snapshot_history_index = int(target_index)
+        self._apply_saved_snapshot_locked(
+            self._snapshot_history[self._snapshot_history_index],
+            game_id=self._game_id or "",
+            config=GameConfigDTO(
+                checkpoint_id=self._config.checkpoint_id,
+                checkpoint_path=str(self._config.checkpoint_path),
+                num_simulations=self._config.num_simulations,
+                player_seat="P0" if self._config.player_seat == "P0" else "P1",
+                seed=self._config.seed,
+                manual_reveal_mode=self._config.manual_reveal_mode,
+                analysis_mode=self._config.analysis_mode,
+            ),
+        )
+        if self._loaded_snapshot_history and history == self._loaded_snapshot_history and self._loaded_move_log_full:
+            self._move_log = list(self._loaded_move_log_full)
+            return
+        self._set_visible_full_snapshot_history_move_log_locked(history)
 
     def _apply_saved_snapshot_locked(
         self,
@@ -2917,21 +2958,7 @@ class GameManager:
                 if self._snapshot_history_index <= 0:
                     raise HTTPException(status_code=400, detail="Nothing to undo")
                 self._cancel_active_job_locked()
-                self._snapshot_history_index -= 1
-                self._apply_saved_snapshot_locked(
-                    self._snapshot_history[self._snapshot_history_index],
-                    game_id=self._game_id or "",
-                    config=GameConfigDTO(
-                        checkpoint_id=self._config.checkpoint_id,
-                        checkpoint_path=str(self._config.checkpoint_path),
-                        num_simulations=self._config.num_simulations,
-                        player_seat="P0" if self._config.player_seat == "P0" else "P1",
-                        seed=self._config.seed,
-                        manual_reveal_mode=self._config.manual_reveal_mode,
-                        analysis_mode=self._config.analysis_mode,
-                    ),
-                )
-                self._refresh_move_log_from_snapshot_history_locked()
+                self._restore_snapshot_history_position_locked(self._snapshot_history, self._snapshot_history_index - 1)
                 return self._snapshot_locked()
             if not self._event_log:
                 raise HTTPException(status_code=400, detail="Nothing to undo")
@@ -2949,21 +2976,7 @@ class GameManager:
                 if self._snapshot_history_index >= len(self._snapshot_history) - 1:
                     raise HTTPException(status_code=400, detail="Nothing to redo")
                 self._cancel_active_job_locked()
-                self._snapshot_history_index += 1
-                self._apply_saved_snapshot_locked(
-                    self._snapshot_history[self._snapshot_history_index],
-                    game_id=self._game_id or "",
-                    config=GameConfigDTO(
-                        checkpoint_id=self._config.checkpoint_id,
-                        checkpoint_path=str(self._config.checkpoint_path),
-                        num_simulations=self._config.num_simulations,
-                        player_seat="P0" if self._config.player_seat == "P0" else "P1",
-                        seed=self._config.seed,
-                        manual_reveal_mode=self._config.manual_reveal_mode,
-                        analysis_mode=self._config.analysis_mode,
-                    ),
-                )
-                self._refresh_move_log_from_snapshot_history_locked()
+                self._restore_snapshot_history_position_locked(self._snapshot_history, self._snapshot_history_index + 1)
                 return self._snapshot_locked()
             if not self._redo_log:
                 raise HTTPException(status_code=400, detail="Nothing to redo")
@@ -2980,21 +2993,7 @@ class GameManager:
                 if self._snapshot_history_index <= 0:
                     raise HTTPException(status_code=400, detail="Already at first position")
                 self._cancel_active_job_locked()
-                self._snapshot_history_index = 0
-                self._apply_saved_snapshot_locked(
-                    self._snapshot_history[self._snapshot_history_index],
-                    game_id=self._game_id or "",
-                    config=GameConfigDTO(
-                        checkpoint_id=self._config.checkpoint_id,
-                        checkpoint_path=str(self._config.checkpoint_path),
-                        num_simulations=self._config.num_simulations,
-                        player_seat="P0" if self._config.player_seat == "P0" else "P1",
-                        seed=self._config.seed,
-                        manual_reveal_mode=self._config.manual_reveal_mode,
-                        analysis_mode=self._config.analysis_mode,
-                    ),
-                )
-                self._refresh_move_log_from_snapshot_history_locked()
+                self._restore_snapshot_history_position_locked(self._snapshot_history, 0)
                 return self._snapshot_locked()
             if not self._event_log:
                 raise HTTPException(status_code=400, detail="Already at first position")
@@ -3011,21 +3010,7 @@ class GameManager:
                 if self._snapshot_history_index >= last_index:
                     raise HTTPException(status_code=400, detail="Already at latest position")
                 self._cancel_active_job_locked()
-                self._snapshot_history_index = last_index
-                self._apply_saved_snapshot_locked(
-                    self._snapshot_history[self._snapshot_history_index],
-                    game_id=self._game_id or "",
-                    config=GameConfigDTO(
-                        checkpoint_id=self._config.checkpoint_id,
-                        checkpoint_path=str(self._config.checkpoint_path),
-                        num_simulations=self._config.num_simulations,
-                        player_seat="P0" if self._config.player_seat == "P0" else "P1",
-                        seed=self._config.seed,
-                        manual_reveal_mode=self._config.manual_reveal_mode,
-                        analysis_mode=self._config.analysis_mode,
-                    ),
-                )
-                self._refresh_move_log_from_snapshot_history_locked()
+                self._restore_snapshot_history_position_locked(self._snapshot_history, last_index)
                 return self._snapshot_locked()
             if not self._redo_log:
                 raise HTTPException(status_code=400, detail="Already at latest position")
@@ -3050,30 +3035,17 @@ class GameManager:
                         target_index = idx
                     else:
                         break
-                self._snapshot_history_index = target_index
-                self._apply_saved_snapshot_locked(
-                    self._snapshot_history[self._snapshot_history_index],
-                    game_id=self._game_id or "",
-                    config=GameConfigDTO(
-                        checkpoint_id=self._config.checkpoint_id,
-                        checkpoint_path=str(self._config.checkpoint_path),
-                        num_simulations=self._config.num_simulations,
-                        player_seat="P0" if self._config.player_seat == "P0" else "P1",
-                        seed=self._config.seed,
-                        manual_reveal_mode=self._config.manual_reveal_mode,
-                        analysis_mode=self._config.analysis_mode,
-                    ),
-                )
-                self._refresh_move_log_from_snapshot_history_locked()
+                self._restore_snapshot_history_position_locked(self._snapshot_history, target_index)
                 return self._snapshot_locked()
 
-            current_turn = int(self._turn_index)
-            if target_turn > current_turn:
-                raise HTTPException(status_code=400, detail=f"turn_index must be <= current turn ({current_turn})")
+            full_event_history = [*self._event_log, *self._redo_log]
+            total_turns = sum(1 for event in full_event_history if event.kind == "move")
+            if target_turn > total_turns:
+                raise HTTPException(status_code=400, detail=f"turn_index must be <= current turn ({total_turns})")
 
             selected_events: list[GameEvent] = []
             moves_applied = 0
-            for event in self._event_log:
+            for event in full_event_history:
                 if event.kind == "move":
                     if moves_applied >= target_turn:
                         break
@@ -3087,7 +3059,7 @@ class GameManager:
             if moves_applied != target_turn:
                 raise HTTPException(status_code=400, detail="Could not reconstruct requested turn")
 
-            remaining_events = self._event_log[len(selected_events):]
+            remaining_events = full_event_history[len(selected_events):]
             self._rebuild_from_events_locked(selected_events)
             self._redo_log = list(remaining_events)
             return self._snapshot_locked()
@@ -3107,30 +3079,7 @@ class GameManager:
             self._cancel_active_job_locked()
             # Restore active snapshot history from the originally loaded mainline
             # so users can jump back to canonical positions after branching.
-            self._snapshot_history = list(history_source)
-            self._snapshot_history_index = target_index
-            self._apply_saved_snapshot_locked(
-                self._snapshot_history[self._snapshot_history_index],
-                game_id=self._game_id or "",
-                config=GameConfigDTO(
-                    checkpoint_id=self._config.checkpoint_id,
-                    checkpoint_path=str(self._config.checkpoint_path),
-                    num_simulations=self._config.num_simulations,
-                    player_seat="P0" if self._config.player_seat == "P0" else "P1",
-                    seed=self._config.seed,
-                    manual_reveal_mode=self._config.manual_reveal_mode,
-                    analysis_mode=self._config.analysis_mode,
-                ),
-            )
-            if using_loaded_history and self._loaded_move_log_full:
-                # Keep the full observed mainline visible in the UI while
-                # navigating to historical positions from a loaded/live game.
-                # The highlighted/current snapshot logic already determines
-                # which move is active, so truncating the list here only makes
-                # later moves disappear until the next live reload restores them.
-                self._move_log = list(self._loaded_move_log_full)
-            else:
-                self._refresh_move_log_from_snapshot_history_locked()
+            self._restore_snapshot_history_position_locked(history_source, target_index)
             return self._snapshot_locked()
 
 

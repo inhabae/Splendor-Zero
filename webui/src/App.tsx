@@ -404,15 +404,27 @@ const displayedP0EvalRef = useRef<number | null>(null);
     if (moveLogEntries.length === 0) {
       return 0;
     }
-    const exact = moveLogEntries.find((move) => move.result_turn_index === snapshot.turn_index);
-    if (exact) {
-      return exact.result_snapshot_index;
+    let bestSnapshotIndex = 0;
+    for (const move of moveLogEntries) {
+      if (move.result_turn_index > snapshot.turn_index) {
+        continue;
+      }
+      if (move.result_snapshot_index > bestSnapshotIndex) {
+        bestSnapshotIndex = move.result_snapshot_index;
+      }
     }
-    return moveLogEntries[moveLogEntries.length - 1].result_snapshot_index;
+    return bestSnapshotIndex;
   }, [snapshot, moveLogEntries]);
   const mainlineMoveSnapshotIndices = useMemo<number[]>(() => {
     const indices = moveLogEntries
       .map((move) => move.result_snapshot_index)
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const uniqueInOrder = Array.from(new Set(indices));
+    return [0, ...uniqueInOrder];
+  }, [moveLogEntries]);
+  const mainlineMoveTurnIndices = useMemo<number[]>(() => {
+    const indices = moveLogEntries
+      .map((move) => move.result_turn_index)
       .filter((value) => Number.isFinite(value) && value > 0);
     const uniqueInOrder = Array.from(new Set(indices));
     return [0, ...uniqueInOrder];
@@ -478,6 +490,21 @@ const displayedP0EvalRef = useRef<number | null>(null);
     }
     return null;
   }, [variationBranches, currentSnapshotIndex, snapshot]);
+  function isHighlightedMainlineMove(move: MoveLogDisplayEntry | null | undefined): boolean {
+    if (!move || highlightedVariation != null || highlightedMove == null) {
+      return false;
+    }
+    if (snapshot?.current_snapshot_index != null) {
+      return (
+        move.actor === highlightedMove.actor
+        && move.result_snapshot_index === highlightedMove.resultSnapshotIndex
+      );
+    }
+    return (
+      move.actor === highlightedMove.actor
+      && move.result_turn_index === highlightedMove.resultTurnIndex
+    );
+  }
 
   useEffect(() => {
     void (async () => {
@@ -647,6 +674,26 @@ const displayedP0EvalRef = useRef<number | null>(null);
       );
     }
     setSnapshot(nextSnapshot);
+    if (nextSnapshot.config?.analysis_mode) {
+      setLoadedMoveLog((prev) => {
+        const incoming = nextSnapshot.move_log ?? [];
+        if (!prev || prev.length === 0) {
+          return incoming;
+        }
+        if (incoming.length >= prev.length) {
+          return incoming;
+        }
+        const isIncomingPrefix = incoming.every((move, idx) => {
+          const prior = prev[idx];
+          return prior
+            && prior.result_turn_index === move.result_turn_index
+            && prior.result_snapshot_index === move.result_snapshot_index
+            && prior.action_idx === move.action_idx
+            && prior.actor === move.actor;
+        });
+        return isIncomingPrefix ? prev : incoming;
+      });
+    }
     lastSnapshotSearchKeyRef.current = snapshotSearchKey(nextSnapshot);
     setUiStatus(deriveUiStatus(nextSnapshot));
     const nextAutoAnalyzeKey = autoAnalyzeKey(nextSnapshot);
@@ -1114,7 +1161,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
         const baseFullMoveNumber = variationCtx?.baseFullMoveNumber ?? 1;
 
         if (activeVariationBranchIdRef.current == null) {
-          const isDeviation = !expectedMainlineMove || expectedMainlineMove.action_idx !== actionIdx;
+          const isDeviation = expectedMainlineMove != null && expectedMainlineMove.action_idx !== actionIdx;
           if (isDeviation) {
             const branchId = variationBranchIdCounterRef.current++;
             activeVariationBranchIdRef.current = branchId;
@@ -1362,8 +1409,25 @@ const displayedP0EvalRef = useRef<number | null>(null);
       if (!fallbackToTurn) {
         return;
       }
+      const fallbackTurnIndex = (() => {
+        if (snapshotIndex <= 0) {
+          return 0;
+        }
+        let bestSnapshotIndex = -1;
+        let bestTurnIndex: number | null = null;
+        for (const move of moveLogEntries) {
+          if (move.result_snapshot_index > snapshotIndex) {
+            continue;
+          }
+          if (bestTurnIndex == null || move.result_snapshot_index > bestSnapshotIndex) {
+            bestSnapshotIndex = move.result_snapshot_index;
+            bestTurnIndex = move.result_turn_index;
+          }
+        }
+        return bestTurnIndex ?? 0;
+      })();
       // Fallback for non-snapshot sessions.
-      await onJumpToTurn(Math.max(0, Math.floor(snapshotIndex)), false, suppressAutoAnalyze || isLoadedPostAnalysisGame);
+      await onJumpToTurn(fallbackTurnIndex, false, suppressAutoAnalyze || isLoadedPostAnalysisGame);
     }
   }
 
@@ -1372,24 +1436,30 @@ const displayedP0EvalRef = useRef<number | null>(null);
       return;
     }
 
-    const activeSnapshotIndex = snapshot.current_snapshot_index ?? currentSnapshotIndex;
+    const useTurnNavigation = snapshot.current_snapshot_index == null;
+    const navigationTargets = useTurnNavigation ? mainlineMoveTurnIndices : mainlineMoveSnapshotIndices;
+    const activeSnapshotIndex = useTurnNavigation ? snapshot.turn_index : currentSnapshotIndex;
     let baseIdx = 0;
-    for (let i = 0; i < mainlineMoveSnapshotIndices.length; i += 1) {
-      if (mainlineMoveSnapshotIndices[i] <= activeSnapshotIndex) {
+    for (let i = 0; i < navigationTargets.length; i += 1) {
+      if (navigationTargets[i] <= activeSnapshotIndex) {
         baseIdx = i;
       }
     }
 
     const nextPos = baseIdx + delta;
-    if (nextPos < 0 || nextPos >= mainlineMoveSnapshotIndices.length) {
+    if (nextPos < 0 || nextPos >= navigationTargets.length) {
       return;
     }
 
-    const nextSnapshotIndex = mainlineMoveSnapshotIndices[nextPos];
+    const nextSnapshotIndex = navigationTargets[nextPos];
     if (nextSnapshotIndex === activeSnapshotIndex) {
       return;
     }
 
+    if (useTurnNavigation) {
+      await onJumpToTurn(nextSnapshotIndex, false, suppressAutoAnalyze);
+      return;
+    }
     await onJumpToSnapshot(nextSnapshotIndex, false, suppressAutoAnalyze, false);
   }
 
@@ -2276,7 +2346,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
   ]);
 
   useEffect(() => {
-    const keyboardNavigationEnabled = homeView === 'QUICK' || isSetupLikeView || homeView === 'LIVE';
+    const keyboardNavigationEnabled = homeView === 'QUICK' || homeView === 'ANALYSIS' || isSetupLikeView || homeView === 'LIVE';
     const activeSnapshot = snapshot;
     if (!activeSnapshot || !keyboardNavigationEnabled || moveLogEntries.length === 0 || isDeepAnalysisRunning) {
       return;
@@ -2303,15 +2373,24 @@ const displayedP0EvalRef = useRef<number | null>(null);
 
       if (event.key === 'ArrowUp') {
         event.preventDefault();
+        if (activeSnapshot.current_snapshot_index == null) {
+          void onJumpToTurn(0, false, !autoAnalyzeOnNavigation);
+          return;
+        }
         void onJumpToSnapshot(0, false, !autoAnalyzeOnNavigation, false);
         return;
       }
 
       if (event.key === 'ArrowDown') {
-        const finalSnapshotIndex = mainlineMoveSnapshotIndices.length > 0
-          ? mainlineMoveSnapshotIndices[mainlineMoveSnapshotIndices.length - 1]
-          : 0;
+        const useTurnNavigation = activeSnapshot.current_snapshot_index == null;
+        const finalSnapshotIndex = useTurnNavigation
+          ? (mainlineMoveTurnIndices.length > 0 ? mainlineMoveTurnIndices[mainlineMoveTurnIndices.length - 1] : 0)
+          : (mainlineMoveSnapshotIndices.length > 0 ? mainlineMoveSnapshotIndices[mainlineMoveSnapshotIndices.length - 1] : 0);
         event.preventDefault();
+        if (useTurnNavigation) {
+          void onJumpToTurn(finalSnapshotIndex, false, !autoAnalyzeOnNavigation);
+          return;
+        }
         void onJumpToSnapshot(finalSnapshotIndex, false, !autoAnalyzeOnNavigation, false);
         return;
       }
@@ -2334,6 +2413,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     isDeepAnalysisRunning,
     autoAnalyzeOnNavigation,
     mainlineMoveSnapshotIndices,
+    mainlineMoveTurnIndices,
     currentSnapshotIndex,
   ]);
 
@@ -2886,21 +2966,13 @@ const displayedP0EvalRef = useRef<number | null>(null);
                           <button
                             type="button"
                             className={`move-log-btn ${
-                              highlightedVariation == null
-                              && snapshot?.current_snapshot_index != null
-                              && highlightedMove?.actor === 'P0'
-                              && p0TargetSnapshot === highlightedMove.resultSnapshotIndex
+                              isHighlightedMainlineMove(row.p0)
                                 ? 'active'
                                 : ''
                             }`}
                             disabled={
                               p0TargetSnapshot == null
-                              || (
-                                highlightedVariation == null
-                                && snapshot?.current_snapshot_index != null
-                                && highlightedMove?.actor === 'P0'
-                                && p0TargetSnapshot === highlightedMove.resultSnapshotIndex
-                              )
+                              || isHighlightedMainlineMove(row.p0)
                             }
                             onClick={() => {
                               if (p0TargetSnapshot != null) {
@@ -2913,21 +2985,13 @@ const displayedP0EvalRef = useRef<number | null>(null);
                           <button
                             type="button"
                             className={`move-log-btn ${
-                              highlightedVariation == null
-                              && snapshot?.current_snapshot_index != null
-                              && highlightedMove?.actor === 'P1'
-                              && p1TargetSnapshot === highlightedMove.resultSnapshotIndex
+                              isHighlightedMainlineMove(row.p1)
                                 ? 'active'
                                 : ''
                             }`}
                             disabled={
                               p1TargetSnapshot == null
-                              || (
-                                highlightedVariation == null
-                                && snapshot?.current_snapshot_index != null
-                                && highlightedMove?.actor === 'P1'
-                                && p1TargetSnapshot === highlightedMove.resultSnapshotIndex
-                              )
+                              || isHighlightedMainlineMove(row.p1)
                             }
                             onClick={() => {
                               if (p1TargetSnapshot != null) {
