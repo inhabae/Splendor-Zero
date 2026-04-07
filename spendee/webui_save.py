@@ -122,7 +122,7 @@ def build_webui_save_payload(
     )
     exported_state["metadata"] = metadata
 
-    checkpoint_abs = str(Path(checkpoint_path).resolve())
+    checkpoint_ref = Path(checkpoint_path).name
     saved_at = datetime.now(timezone.utc).isoformat()
     game_name = _game_name_from_timestamp(observed.observed_at)
     return {
@@ -131,8 +131,8 @@ def build_webui_save_payload(
         "saved_at": saved_at,
         "game_id": observed.game_id,
         "config": {
-            "checkpoint_id": checkpoint_abs,
-            "checkpoint_path": checkpoint_abs,
+            "checkpoint_id": checkpoint_ref,
+            "checkpoint_path": checkpoint_ref,
             "num_simulations": int(num_simulations),
             "player_seat": "P0" if player_seat not in ("P0", "P1") else player_seat,
             "seed": 0,
