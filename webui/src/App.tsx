@@ -198,6 +198,24 @@ function p0WinningEval(value: number | null | undefined, playerToMove: Seat | nu
   return p1Value == null ? null : -p1Value;
 }
 
+function parsePlayerNamesFromFilename(filename: string): Record<Seat, string> | null {
+  const trimmed = filename.replace(/\.[^.]+$/, '').trim();
+  const parts = trimmed.split(/\s+vs\s+/i);
+  if (parts.length !== 2) {
+    return null;
+  }
+  const stripElo = (value: string): string => value.replace(/\s*\(\d+\)\s*$/i, '').trim();
+  const p0Name = stripElo(parts[0] ?? '');
+  const p1Name = stripElo(parts[1] ?? '');
+  if (!p0Name || !p1Name) {
+    return null;
+  }
+  return {
+    P0: p0Name,
+    P1: p1Name,
+  };
+}
+
 export function App() {
   const [checkpoints, setCheckpoints] = useState<CheckpointDTO[]>([]);
   const [catalogCards, setCatalogCards] = useState<CatalogCardDTO[]>([]);
@@ -217,6 +235,7 @@ export function App() {
 
   const [snapshot, setSnapshot] = useState<GameSnapshotDTO | null>(null);
   const [loadedMoveLog, setLoadedMoveLog] = useState<MoveLogEntryDTO[] | null>(null);
+  const [loadedPlayerNames, setLoadedPlayerNames] = useState<Record<Seat, string> | null>(null);
   const [variationBranches, setVariationBranches] = useState<VariationBranch[]>([]);
   const [jobStatus, setJobStatus] = useState<EngineJobStatusDTO | null>(null);
   const [uiStatus, setUiStatus] = useState<UiStatus>('IDLE');
@@ -757,6 +776,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setRevealSelections({});
     setActiveRevealKey(null);
     setLoadedMoveLog(null);
+    setLoadedPlayerNames(null);
     setVariationBranches([]);
     setDeepAnalysisBySnapshot({});
     setDeepAnalysisSearchBySnapshot({});
@@ -802,6 +822,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setJobStatus(null);
     setSnapshot(null);
     setLoadedMoveLog(null);
+    setLoadedPlayerNames(null);
     setVariationBranches([]);
     setDeepAnalysisBySnapshot({});
     setDeepAnalysisSearchBySnapshot({});
@@ -820,6 +841,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setJobStatus(null);
     setSnapshot(null);
     setLoadedMoveLog(null);
+    setLoadedPlayerNames(null);
     setVariationBranches([]);
     setDeepAnalysisBySnapshot({});
     setDeepAnalysisSearchBySnapshot({});
@@ -1733,6 +1755,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     clearPolling();
     setJobStatus(null);
     setLoadedMoveLog(null);
+    setLoadedPlayerNames(parsePlayerNamesFromFilename(file.name));
     setVariationBranches([]);
     setDeepAnalysisBySnapshot({});
     setDeepAnalysisSearchBySnapshot({});
@@ -1986,6 +2009,9 @@ const displayedP0EvalRef = useRef<number | null>(null);
     return topMoveEvalClass(displayedP0EvalValue);
   }, [displayedP0EvalValue]);
   const topAnalysisMoves = useMemo(() => {
+    if (snapshot?.status !== 'IN_PROGRESS') {
+      return [];
+    }
     const details = preferredAnalysisResult?.action_details ?? [];
     return details
       .filter((detail) => !detail.masked)
@@ -1995,7 +2021,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
         return a.action_idx - b.action_idx;
       })
       .slice(0, 3);
-  }, [preferredAnalysisResult]);
+  }, [preferredAnalysisResult, snapshot?.status]);
   const playedAnalysisMove = useMemo(() => {
     if (!currentDeepAnalysisEntry) {
       return null;
@@ -2015,6 +2041,17 @@ const displayedP0EvalRef = useRef<number | null>(null);
     }
     const board: BoardStateDTO = structuredClone(snapshot.board_state);
     const pendingByKey = new Set(snapshot.pending_reveals.map((reveal) => revealKey(reveal.zone, reveal.tier, reveal.slot)));
+
+    board.players = board.players.map((player) => {
+      const overrideName = loadedPlayerNames?.[player.seat];
+      if (!overrideName) {
+        return player;
+      }
+      return {
+        ...player,
+        display_name: `${player.display_name} ${overrideName}`,
+      };
+    }) as BoardStateDTO['players'];
 
     board.tiers = board.tiers.map((tier) => {
       const bySlot = new Map(tier.cards.map((card) => [card.slot ?? -1, card]));
@@ -2064,7 +2101,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     }) as BoardStateDTO['nobles'];
 
     return board;
-  }, [snapshot, activeRevealKey]);
+  }, [snapshot, activeRevealKey, loadedPlayerNames]);
   const activeTierBoardCards = useMemo(() => {
     if (!activeReveal || activeReveal.zone !== 'faceup_card' || !displayBoard) {
       return [] as BoardStateDTO['tiers'][number]['cards'];
@@ -2547,6 +2584,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
                 {displayBoard ? (
                   <GameBoard
                     board={displayBoard}
+                    isTerminal={snapshot.status !== 'IN_PROGRESS'}
                     mctsTopAction={liveMctsTopAction}
                     modelTopAction={liveModelTopAction}
                     onCardClick={(tier, slot) => openReveal('faceup_card', tier, slot)}
@@ -2718,46 +2756,50 @@ const displayedP0EvalRef = useRef<number | null>(null);
                           </div>
                         </div>
                       )}
-                      <div className="analysis-section-header">Top moves</div>
-                      {Array.from({ length: 3 }, (_, index) => {
-                        const detail = topAnalysisMoves[index] ?? null;
-                        const absoluteEval = detail
-                          ? p0WinningEval(detail.q_value, snapshot?.player_to_move ?? null)
-                          : null;
-                        const evalClass = topMoveEvalClass(absoluteEval);
-                        return (
-                          <button
-                            key={detail ? `analysis-line-${detail.action_idx}` : `analysis-line-placeholder-${index}`}
-                            type="button"
-                            className={`analysis-line analysis-line-button ${detail ? '' : 'placeholder'}`}
-                            role="listitem"
-                            disabled={!detail}
-                            onClick={() => {
-                              if (detail) {
-                                void onSelectAnalysisAction(detail.action_idx);
-                              }
-                            }}
-                          >
-                            <div className="analysis-line-stats">
-                              <span className={`analysis-line-q ${evalClass}`}>
-                                {detail ? formatTopMoveEval(absoluteEval) : '--'}
-                              </span>
-                              <span className="analysis-line-visit">
-                                {detail ? `${(detail.policy_prob * 100).toFixed(1)}%` : '--'}
-                              </span>
-                            </div>
-                            <div className="analysis-line-name">
-                              {detail
-                                ? <ActionLabel
-                                    actionIdx={detail.action_idx}
-                                    display={detail.display ?? null}
-                                    board={displayBoard ?? snapshot?.board_state ?? null}
-                                  />
-                                : 'Waiting for search...'}
-                            </div>
-                          </button>
-                        );
-                      })}
+                      {snapshot?.status === 'IN_PROGRESS' && (
+                        <>
+                          <div className="analysis-section-header">Top moves</div>
+                          {Array.from({ length: 3 }, (_, index) => {
+                            const detail = topAnalysisMoves[index] ?? null;
+                            const absoluteEval = detail
+                              ? p0WinningEval(detail.q_value, snapshot?.player_to_move ?? null)
+                              : null;
+                            const evalClass = topMoveEvalClass(absoluteEval);
+                            return (
+                              <button
+                                key={detail ? `analysis-line-${detail.action_idx}` : `analysis-line-placeholder-${index}`}
+                                type="button"
+                                className={`analysis-line analysis-line-button ${detail ? '' : 'placeholder'}`}
+                                role="listitem"
+                                disabled={!detail}
+                                onClick={() => {
+                                  if (detail) {
+                                    void onSelectAnalysisAction(detail.action_idx);
+                                  }
+                                }}
+                              >
+                                <div className="analysis-line-stats">
+                                  <span className={`analysis-line-q ${evalClass}`}>
+                                    {detail ? formatTopMoveEval(absoluteEval) : '--'}
+                                  </span>
+                                  <span className="analysis-line-visit">
+                                    {detail ? `${(detail.policy_prob * 100).toFixed(1)}%` : '--'}
+                                  </span>
+                                </div>
+                                <div className="analysis-line-name">
+                                  {detail
+                                    ? <ActionLabel
+                                        actionIdx={detail.action_idx}
+                                        display={detail.display ?? null}
+                                        board={displayBoard ?? snapshot?.board_state ?? null}
+                                      />
+                                    : 'Waiting for search...'}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </>
+                      )}
                   </div>
                 )}
                 {analysisPanelTab === 'ANALYSIS' && !showBoardAnalysis && (

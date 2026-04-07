@@ -1058,6 +1058,46 @@ def _player_purchased_ids(state: dict[str, Any], player_idx: int) -> set[int]:
     return {int(card_id) for card_id in purchased if isinstance(card_id, int)}
 
 
+def _bridge_snapshot_indicates_finished(state: dict[str, Any]) -> bool:
+    meta = state.get("metadata") if isinstance(state, dict) else None
+    if not isinstance(meta, dict):
+        return False
+    if str(meta.get("source", "")) != "spendee_bridge":
+        return False
+    current_turn_seat = str(meta.get("spendee_current_turn_seat", meta.get("current_turn_seat", ""))).upper()
+    return current_turn_seat == "NONE"
+
+
+def _winner_from_saved_state(state: dict[str, Any]) -> int:
+    players = state.get("players")
+    if not isinstance(players, list) or len(players) < 2:
+        return -1
+
+    def _player_points(player: Any) -> int:
+        return int(player.get("points", 0)) if isinstance(player, dict) else 0
+
+    def _player_card_count(player: Any) -> int:
+        if not isinstance(player, dict):
+            return 0
+        purchased = player.get("purchased_card_ids")
+        return len(purchased) if isinstance(purchased, list) else 0
+
+    p0_points = _player_points(players[0])
+    p1_points = _player_points(players[1])
+    if p0_points > p1_points:
+        return 0
+    if p1_points > p0_points:
+        return 1
+
+    p0_cards = _player_card_count(players[0])
+    p1_cards = _player_card_count(players[1])
+    if p0_cards < p1_cards:
+        return 0
+    if p1_cards < p0_cards:
+        return 1
+    return -1
+
+
 def _card_id_occurs_elsewhere_in_state(
     state: dict[str, Any],
     *,
@@ -1687,6 +1727,7 @@ class GameManager:
         self._active_job_id: str | None = None
         self._jobs: dict[str, EngineJob] = {}
         self._forced_winner: int | None = None
+        self._forced_status: str | None = None
         self._pending_reveals: list[PendingReveal] = []
         self._setup_event_log: list[GameEvent] = []
         self._event_log: list[GameEvent] = []
@@ -2055,8 +2096,13 @@ class GameManager:
         self._redo_log = []
         self._pending_reveals = []
         self._forced_winner = None
+        self._forced_status = None
         self._rng = random.Random(int(config.seed))
         self._determinization_seed = random.randint(0, 2**31 - 1)
+
+        if _bridge_snapshot_indicates_finished(saved.exported_state):
+            self._forced_winner = _winner_from_saved_state(saved.exported_state)
+            self._forced_status = "COMPLETED"
 
     def new_game(self, req: NewGameRequest) -> GameSnapshotDTO:
         with self._lock:
@@ -2082,6 +2128,7 @@ class GameManager:
             self._rng = random.Random(seed)
             self._determinization_seed = random.randint(0, 2**31 - 1)
             self._forced_winner = None
+            self._forced_status = None
             self._pending_reveals = _initial_setup_pending_reveals() if bool(req.manual_reveal_mode) else []
             self._setup_event_log = []
             self._event_log = []
@@ -2104,7 +2151,7 @@ class GameManager:
 
         if self._forced_winner is not None:
             winner = int(self._forced_winner)
-            status = "RESIGNED"
+            status = self._forced_status or "RESIGNED"
             legal_actions = []
         elif step.is_terminal:
             status = "COMPLETED"
@@ -2371,6 +2418,7 @@ class GameManager:
             if self._config is None:
                 raise RuntimeError("Missing config during resign replay")
             self._forced_winner = 1 if self._config.player_seat == "P0" else 0
+            self._forced_status = "RESIGNED"
             return
         raise RuntimeError(f"Unknown event kind: {event.kind}")
 
@@ -2383,6 +2431,7 @@ class GameManager:
         self._move_log = []
         self._rng = random.Random(self._config.seed)
         self._forced_winner = None
+        self._forced_status = None
         self._pending_reveals = _initial_setup_pending_reveals() if self._config.manual_reveal_mode else []
         self._event_log = []
         for event in self._setup_event_log:
@@ -2857,6 +2906,7 @@ class GameManager:
                 return self._snapshot_locked()
             self._cancel_active_job_locked()
             self._forced_winner = 1 if config.player_seat == "P0" else 0
+            self._forced_status = "RESIGNED"
             self._record_event_locked(GameEvent(kind="resign"))
             return self._snapshot_locked()
 

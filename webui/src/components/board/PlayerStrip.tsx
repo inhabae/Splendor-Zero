@@ -7,12 +7,14 @@ const TOKEN_ORDER: Array<keyof TokenCountsDTO> = ['gold', 'white', 'blue', 'gree
 export function PlayerStrip({
   player,
   seat,
+  isTerminal = false,
   mctsTopAction,
   modelTopAction,
   onReservedCardClick,
 }: {
   player: PlayerBoardDTO;
   seat: Seat;
+  isTerminal?: boolean;
   mctsTopAction?: ActionVizDTO | null;
   modelTopAction?: ActionVizDTO | null;
   onReservedCardClick?: (seat: Seat, slot: number) => void;
@@ -24,7 +26,7 @@ export function PlayerStrip({
     <section className="player-strip" aria-label={`Player ${seat} state`}>
       <div className="player-strip-header">
         <h3>{player.display_name}</h3>
-        {player.is_to_move && <div className="turn-badge">To Move</div>}
+        {!isTerminal && player.is_to_move && <div className="turn-badge">To Move</div>}
         <div className="point-badge">{player.points}★</div>
       </div>
 

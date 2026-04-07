@@ -69,6 +69,7 @@ function actionBankColors(action: ActionVizDTO | null | undefined): Set<string> 
 
 export function GameBoard({
   board,
+  isTerminal = false,
   mctsTopAction = null,
   modelTopAction = null,
   onCardClick,
@@ -76,6 +77,7 @@ export function GameBoard({
   onReservedCardClick,
 }: {
   board: BoardStateDTO;
+  isTerminal?: boolean;
   mctsTopAction?: ActionVizDTO | null;
   modelTopAction?: ActionVizDTO | null;
   onCardClick?: (tier: number, slot: number) => void;
@@ -88,8 +90,8 @@ export function GameBoard({
     <section className="board-surface">
       <section className="board-main">
         <aside className="board-left">
-          <PlayerStrip player={board.players[0]} seat="P0" mctsTopAction={mctsTopAction} modelTopAction={modelTopAction} onReservedCardClick={onReservedCardClick} />
-          <PlayerStrip player={board.players[1]} seat="P1" mctsTopAction={mctsTopAction} modelTopAction={modelTopAction} onReservedCardClick={onReservedCardClick} />
+          <PlayerStrip player={board.players[0]} seat="P0" isTerminal={isTerminal} mctsTopAction={mctsTopAction} modelTopAction={modelTopAction} onReservedCardClick={onReservedCardClick} />
+          <PlayerStrip player={board.players[1]} seat="P1" isTerminal={isTerminal} mctsTopAction={mctsTopAction} modelTopAction={modelTopAction} onReservedCardClick={onReservedCardClick} />
         </aside>
 
         <section className="board-right">

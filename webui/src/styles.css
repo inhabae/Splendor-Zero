@@ -1626,9 +1626,9 @@ button:disabled {
 }
 
 .analysis-panel-body {
-  height: 256px;
-  min-height: 256px;
-  max-height: 256px;
+  height: 196px;
+  min-height: 196px;
+  max-height: 196px;
   overflow: hidden;
 }
 
