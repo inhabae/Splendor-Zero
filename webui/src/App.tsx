@@ -236,6 +236,7 @@ export function App() {
   const isSetupLikeView = homeView === 'ANALYSIS';
   const lastLiveSaveUpdatedAtRef = useRef<string | null>(null);
   const lastAutoAnalyzeKeyRef = useRef<string | null>(null);
+  const lastSnapshotSearchKeyRef = useRef<string | null>(null);
   const autoAnalyzeOnNavigation = showBoardAnalysis;
 
   const selectedCheckpoint = useMemo(
@@ -282,18 +283,13 @@ export function App() {
   const moveLogDisplayEntries = useMemo<MoveLogDisplayEntry[]>(() => {
     let fullMoveNumber = 0;
     let continuationIndex = 0;
-    let prevActor: Seat | null = null;
 
     return moveLogEntries.map((move) => {
       const isContinuation = isContinuationAction(move.action_idx);
-      let displayActor = move.actor;
+      const displayActor = move.actor;
 
-      if (isContinuation && prevActor != null) {
-        displayActor = prevActor;
+      if (isContinuation) {
         continuationIndex += 1;
-      } else if (isContinuation) {
-        continuationIndex = 1;
-        fullMoveNumber = Math.max(1, fullMoveNumber);
       } else {
         continuationIndex = 0;
         if (displayActor === 'P0') {
@@ -306,7 +302,6 @@ export function App() {
       const suffix = continuationSuffix(continuationIndex);
       const base = `${fullMoveNumber}${suffix}`;
       const notation = displayActor === 'P0' ? `${base}.` : `${base}...`;
-      prevActor = displayActor;
 
       return {
         ...move,
@@ -577,29 +572,56 @@ export function App() {
     ].join(':');
   }
 
+  function snapshotSearchKey(nextSnapshot: GameSnapshotDTO): string {
+    return JSON.stringify({
+      gameId: nextSnapshot.game_id,
+      status: nextSnapshot.status,
+      winner: nextSnapshot.winner,
+      turnIndex: nextSnapshot.turn_index,
+      snapshotIndex: nextSnapshot.current_snapshot_index,
+      playerToMove: nextSnapshot.player_to_move,
+      legalActions: nextSnapshot.legal_actions,
+      pendingReveals: nextSnapshot.pending_reveals.map((reveal) => ({
+        zone: reveal.zone,
+        tier: reveal.tier,
+        slot: reveal.slot,
+        actor: reveal.actor ?? null,
+        reason: reveal.reason,
+        actionIdx: reveal.action_idx ?? null,
+      })),
+      moveLogLength: nextSnapshot.move_log.length,
+    });
+  }
+
   async function handleSnapshotUpdate(
     nextSnapshot: GameSnapshotDTO,
     engineShouldMove = false,
     deepSearchOverride: Record<number, DeepAnalysisSearchResult> | null = null,
     suppressAutoAnalyze = false,
+    preserveActiveSearch = false,
   ): Promise<void> {
-    clearPolling();
+    if (!preserveActiveSearch) {
+      clearPolling();
+    }
     const snapshotIndex = nextSnapshot.current_snapshot_index != null
       ? Number(nextSnapshot.current_snapshot_index)
       : null;
     const searchSource = deepSearchOverride ?? deepAnalysisSearchBySnapshot;
     const deepResult = snapshotIndex != null ? (searchSource[snapshotIndex] ?? null) : null;
-    setJobStatus(
-      deepResult
-        ? {
-            job_id: `deep-${snapshotIndex}`,
-            status: 'DONE',
-            result: deepResult,
-            error: null,
-          }
-        : null,
-    );
+    if (deepResult || !preserveActiveSearch) {
+      setJobStatus(
+        deepResult
+          ? {
+              job_id: `deep-${snapshotIndex}`,
+              status: 'DONE',
+              result: deepResult,
+              error: null,
+            }
+          : null,
+      );
+    }
     setSnapshot(nextSnapshot);
+    lastSnapshotSearchKeyRef.current = snapshotSearchKey(nextSnapshot);
     setUiStatus(deriveUiStatus(nextSnapshot));
     const nextAutoAnalyzeKey = autoAnalyzeKey(nextSnapshot);
     const shouldStartSearch =
@@ -2271,17 +2293,23 @@ export function App() {
         if (status.updated_at === lastLiveSaveUpdatedAtRef.current) {
           return;
         }
-        clearPolling();
-        setJobStatus(null);
         const nextSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/live-save/load', {
           method: 'POST',
           body: '{}',
         });
+        const nextSearchKey = snapshotSearchKey(nextSnapshot);
+        const preserveActiveSearch =
+          activeJobIdRef.current !== null &&
+          lastSnapshotSearchKeyRef.current === nextSearchKey;
+        if (!preserveActiveSearch) {
+          clearPolling();
+          setJobStatus(null);
+        }
         lastLiveSaveUpdatedAtRef.current = status.updated_at;
         if (nextSnapshot.config?.checkpoint_id) {
           setCheckpointId(nextSnapshot.config.checkpoint_id);
         }
-        await handleSnapshotUpdate(nextSnapshot);
+        await handleSnapshotUpdate(nextSnapshot, false, null, false, preserveActiveSearch);
       } catch (err) {
         setError((err as Error).message);
       }

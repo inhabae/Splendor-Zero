@@ -72,6 +72,7 @@ export interface ActionDisplayDTO {
   kind: 'card' | 'deck' | 'tokens' | 'pass' | 'noble' | 'unknown';
   verb: 'BUY' | 'RESERVE' | 'TAKE' | 'RETURN' | 'PASS' | 'NOBLE' | 'UNKNOWN';
   card?: CardDTO | null;
+  noble?: NobleDTO | null;
   tier?: number | null;
   token_colors?: Array<'white' | 'blue' | 'green' | 'red' | 'black'>;
   token_duplicate?: number | null;

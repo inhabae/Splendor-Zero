@@ -108,6 +108,7 @@ class ActionDisplayDTO(BaseModel):
     kind: Literal["card", "deck", "tokens", "pass", "noble", "unknown"]
     verb: Literal["BUY", "RESERVE", "TAKE", "RETURN", "PASS", "NOBLE", "UNKNOWN"]
     card: "CardDTO | None" = None
+    noble: "NobleDTO | None" = None
     tier: int | None = None
     token_colors: list[Literal["white", "blue", "green", "red", "black"]] = Field(default_factory=list)
     token_duplicate: int | None = None
@@ -569,6 +570,12 @@ def _find_reserved_card(board: BoardStateDTO | None, actor: str, slot: int) -> C
     return next((card for card in player.reserved_public if int(card.slot if card.slot is not None else -1) == int(slot)), None)
 
 
+def _find_noble(board: BoardStateDTO | None, slot: int) -> NobleDTO | None:
+    if board is None:
+        return None
+    return next((noble for noble in board.nobles if int(noble.slot if noble.slot is not None else -1) == int(slot)), None)
+
+
 def _build_action_display(action_idx: int, board: BoardStateDTO | None, actor: str | None = None) -> ActionDisplayDTO | None:
     action_idx = int(action_idx)
     if 0 <= action_idx <= 11:
@@ -597,7 +604,8 @@ def _build_action_display(action_idx: int, board: BoardStateDTO | None, actor: s
     if 61 <= action_idx <= 65:
         return ActionDisplayDTO(kind="tokens", verb="RETURN", token_colors=[_COLOR_NAMES[action_idx - 61]])
     if 66 <= action_idx <= 68:
-        return ActionDisplayDTO(kind="noble", verb="NOBLE", noble_slot=action_idx - 66)
+        noble_slot = action_idx - 66
+        return ActionDisplayDTO(kind="noble", verb="NOBLE", noble_slot=noble_slot, noble=_find_noble(board, noble_slot))
     return ActionDisplayDTO(kind="unknown", verb="UNKNOWN")
 
 
@@ -981,6 +989,34 @@ def _spendee_action_history_delta(start_state: dict[str, Any], end_state: dict[s
     return delta if delta else None
 
 
+def _claimed_noble_ids(state: dict[str, Any], player_idx: int) -> list[int]:
+    players = state.get("players")
+    if not isinstance(players, list) or player_idx < 0 or player_idx >= len(players):
+        return []
+    player = players[player_idx]
+    if not isinstance(player, dict):
+        return []
+    claimed = player.get("claimed_noble_ids")
+    if not isinstance(claimed, list):
+        return []
+    out: list[int] = []
+    for value in claimed:
+        if isinstance(value, int):
+            out.append(int(value))
+    return out
+
+
+def _available_noble_ids(state: dict[str, Any]) -> list[int]:
+    raw = state.get("available_noble_ids")
+    if not isinstance(raw, list):
+        return []
+    out: list[int] = []
+    for value in raw:
+        if isinstance(value, int):
+            out.append(int(value))
+    return out
+
+
 def _spendee_action_history_len(state: dict[str, Any]) -> int | None:
     meta = state.get("metadata") if isinstance(state, dict) else None
     if not isinstance(meta, dict):
@@ -1020,6 +1056,94 @@ def _player_purchased_ids(state: dict[str, Any], player_idx: int) -> set[int]:
     if not isinstance(purchased, list):
         return set()
     return {int(card_id) for card_id in purchased if isinstance(card_id, int)}
+
+
+def _card_id_occurs_elsewhere_in_state(
+    state: dict[str, Any],
+    *,
+    card_id: int,
+    player_idx: int,
+    slot: int,
+) -> bool:
+    faceup_rows = state.get("faceup_card_ids")
+    if isinstance(faceup_rows, list):
+        for row in faceup_rows:
+            if not isinstance(row, list):
+                continue
+            for value in row:
+                if isinstance(value, int) and int(value) == int(card_id):
+                    return True
+
+    deck_rows = state.get("deck_card_ids_by_tier")
+    if isinstance(deck_rows, list):
+        for row in deck_rows:
+            if not isinstance(row, list):
+                continue
+            for value in row:
+                if isinstance(value, int) and int(value) == int(card_id):
+                    return True
+
+    players = state.get("players")
+    if not isinstance(players, list):
+        return False
+    for cur_player_idx, player in enumerate(players):
+        if not isinstance(player, dict):
+            continue
+        purchased = player.get("purchased_card_ids")
+        if isinstance(purchased, list):
+            for value in purchased:
+                if isinstance(value, int) and int(value) == int(card_id):
+                    return True
+        reserved = player.get("reserved")
+        if not isinstance(reserved, list):
+            continue
+        for idx, item in enumerate(reserved):
+            if not isinstance(item, dict):
+                continue
+            item_slot = int(item.get("slot", idx))
+            if cur_player_idx == int(player_idx) and item_slot == int(slot):
+                continue
+            value = item.get("card_id")
+            if isinstance(value, int) and int(value) == int(card_id):
+                return True
+    return False
+
+
+def _force_reveal_reserved_card_if_current(
+    env: SplendorNativeEnv,
+    *,
+    player_idx: int,
+    slot: int,
+    card_id: int,
+) -> bool:
+    state = env.export_state()
+    reserved_by_slot = _player_cards_by_slot(state, player_idx)
+    current = reserved_by_slot.get(slot)
+    if not isinstance(current, dict):
+        return False
+    current_card_id = current.get("card_id")
+    if not isinstance(current_card_id, int) or int(current_card_id) != int(card_id):
+        return False
+    if bool(current.get("is_public", True)):
+        return False
+    players = state.get("players")
+    if not isinstance(players, list) or player_idx >= len(players):
+        return False
+    player = players[player_idx]
+    if not isinstance(player, dict):
+        return False
+    reserved = player.get("reserved")
+    if not isinstance(reserved, list):
+        return False
+    for item in reserved:
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("slot", -1)) != int(slot):
+            continue
+        item["is_public"] = True
+        env.load_state(state)
+        return True
+    return False
 
 
 def _resolve_hidden_reserved_card_id(
@@ -1076,6 +1200,17 @@ def _normalize_saved_snapshots_hidden_reserved_cards(snapshots: list["SavedState
                     slot=slot,
                 )
                 if actual_card_id is None:
+                    continue
+                if _card_id_occurs_elsewhere_in_state(
+                    state,
+                    card_id=int(actual_card_id),
+                    player_idx=player_idx,
+                    slot=slot,
+                ):
+                    # Some bridge logs reveal the future hidden card identity
+                    # before the current snapshot has removed that card from the
+                    # public board/deck. Keep the original placeholder in that
+                    # ambiguous case so the snapshot remains loadable.
                     continue
                 previous_card_id = item.get("card_id")
                 if isinstance(previous_card_id, int) and int(previous_card_id) != int(actual_card_id):
@@ -1679,6 +1814,20 @@ class GameManager:
         start_step = probe.get_state()
         legal_first = np.flatnonzero(np.asarray(start_step.mask, dtype=np.bool_))
 
+        if bool(start_state.get("phase_flags", {}).get("is_noble_choice_phase")):
+            actor = int(start_step.current_player_id)
+            start_claimed = set(_claimed_noble_ids(start_state, actor))
+            end_claimed = set(_claimed_noble_ids(end_state, actor))
+            claimed_delta = sorted(end_claimed - start_claimed)
+            if len(claimed_delta) == 1:
+                available_nobles = _available_noble_ids(start_state)
+                noble_id = claimed_delta[0]
+                if noble_id in available_nobles:
+                    noble_slot = available_nobles.index(noble_id)
+                    action_idx = 66 + noble_slot
+                    if 0 <= noble_slot <= 2 and bool(start_step.mask[action_idx]):
+                        return [action_idx]
+
         def _matching_sequences(matcher: Callable[[dict[str, Any]], bool], max_actions: int = 4) -> list[list[int]]:
             matches: list[list[int]] = []
             for first in legal_first:
@@ -1729,6 +1878,49 @@ class GameManager:
         if len(observable_candidates) > 1:
             observable_candidates.sort(key=lambda seq: (len(seq), seq))
             return observable_candidates[0]
+
+        actor = int(start_step.current_player_id)
+        start_purchased = _player_purchased_ids(start_state, actor)
+        end_purchased = _player_purchased_ids(end_state, actor)
+        purchased_delta = sorted(end_purchased - start_purchased)
+        if len(purchased_delta) == 1:
+            purchased_card_id = int(purchased_delta[0])
+            start_faceup_rows = start_state.get("faceup_card_ids")
+            end_faceup_rows = end_state.get("faceup_card_ids")
+            faceup_match_actions: list[int] = []
+            if isinstance(start_faceup_rows, list) and isinstance(end_faceup_rows, list):
+                for tier_idx, (start_row, end_row) in enumerate(zip(start_faceup_rows, end_faceup_rows), start=1):
+                    if not isinstance(start_row, list) or not isinstance(end_row, list):
+                        continue
+                    for slot_idx, (start_card, end_card) in enumerate(zip(start_row, end_row)):
+                        if int(start_card) != purchased_card_id:
+                            continue
+                        if int(end_card) == purchased_card_id:
+                            continue
+                        action_idx = (tier_idx - 1) * 4 + slot_idx
+                        if 0 <= action_idx <= 11 and bool(start_step.mask[action_idx]):
+                            faceup_match_actions.append(action_idx)
+            if len(faceup_match_actions) == 1:
+                return [faceup_match_actions[0]]
+
+            reserved_by_slot = _player_cards_by_slot(start_state, actor)
+            public_match_slots = [
+                slot
+                for slot, item in reserved_by_slot.items()
+                if bool(item.get("is_public", True)) and int(item.get("card_id", -1)) == purchased_card_id
+            ]
+            hidden_slots = [
+                slot
+                for slot, item in reserved_by_slot.items()
+                if not bool(item.get("is_public", True))
+            ]
+            candidate_slots = public_match_slots
+            if not candidate_slots and len(hidden_slots) == 1:
+                candidate_slots = hidden_slots
+            if len(candidate_slots) == 1:
+                action_idx = 12 + int(candidate_slots[0])
+                if 12 <= action_idx <= 14 and bool(start_step.mask[action_idx]):
+                    return [action_idx]
         return None
 
     def _refresh_move_log_from_snapshot_history_locked(self) -> None:
@@ -2104,7 +2296,17 @@ class GameManager:
         if event.kind == "reveal_reserved_card":
             if event.actor is None or event.slot is None or event.card_id is None:
                 raise RuntimeError("Corrupt reveal_reserved_card event")
-            env.set_reserved_card(0 if event.actor == "P0" else 1, event.slot, event.card_id)
+            player_idx = 0 if event.actor == "P0" else 1
+            try:
+                env.set_reserved_card(player_idx, event.slot, event.card_id)
+            except Exception:
+                if not _force_reveal_reserved_card_if_current(
+                    env,
+                    player_idx=player_idx,
+                    slot=event.slot,
+                    card_id=event.card_id,
+                ):
+                    raise
             pending_index = next(
                 (
                     idx
@@ -2594,7 +2796,17 @@ class GameManager:
                 ),
                 None,
             )
-            env.set_reserved_card(0 if req.seat == "P0" else 1, req.slot, req.card_id)
+            player_idx = 0 if req.seat == "P0" else 1
+            try:
+                env.set_reserved_card(player_idx, req.slot, req.card_id)
+            except Exception:
+                if not _force_reveal_reserved_card_if_current(
+                    env,
+                    player_idx=player_idx,
+                    slot=req.slot,
+                    card_id=req.card_id,
+                ):
+                    raise
             if pending_index is not None:
                 self._pending_reveals.pop(pending_index)
             self._record_event_locked(GameEvent(kind="reveal_reserved_card", actor=req.seat, slot=req.slot, card_id=req.card_id))

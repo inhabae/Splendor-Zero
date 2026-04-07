@@ -1,4 +1,4 @@
-import { ActionDisplayDTO, BoardStateDTO, CardDTO } from '../types';
+import { ActionDisplayDTO, BoardStateDTO, CardDTO, NobleDTO } from '../types';
 
 const TAKE3_TRIPLETS = [
   [0, 1, 2],
@@ -45,6 +45,10 @@ function reservedCard(board: BoardStateDTO | null | undefined, slot: number): Ca
   return player.reserved_public.find((card) => card.slot === slot) ?? null;
 }
 
+function nobleBySlot(board: BoardStateDTO | null | undefined, slot: number): NobleDTO | null {
+  return board?.nobles.find((noble) => noble.slot === slot) ?? null;
+}
+
 function costEntries(card: CardDTO): Array<{ color: (typeof COLOR_ORDER)[number]; count: number }> {
   return COLOR_ORDER.filter((color) => card.cost[color] > 0).map((color) => ({
     color,
@@ -54,6 +58,10 @@ function costEntries(card: CardDTO): Array<{ color: (typeof COLOR_ORDER)[number]
 
 function GemChip({ color }: { color: (typeof COLOR_ORDER)[number] }) {
   return <span className={`action-gem-chip token-${color}`} aria-hidden="true" />;
+}
+
+function SquareGemChip({ color }: { color: (typeof COLOR_ORDER)[number] }) {
+  return <span className={`action-gem-chip action-gem-chip-square token-${color}`} aria-hidden="true" />;
 }
 
 function CardActionLabel({ verb, card }: { verb: 'BUY' | 'RESERVE'; card: CardDTO | null }) {
@@ -103,6 +111,31 @@ function DeckReserveLabel({ tier }: { tier: 1 | 2 | 3 }) {
   );
 }
 
+function NobleActionLabel({ noble, slot }: { noble: NobleDTO | null; slot: number | null | undefined }) {
+  if (!noble) {
+    return (
+      <>
+        <span className="action-verb">NOBLE</span>
+        <span className="action-meta">#{slot ?? 0}</span>
+      </>
+    );
+  }
+  const reqs = COLOR_ORDER.filter((color) => noble.requirements[color] > 0);
+  return (
+    <>
+      <span className="action-verb">NOBLE</span>
+      <span className="action-group action-group-card-reqs">
+        {reqs.map((color) => (
+          <span key={`noble-${slot ?? 0}-${color}`} className="action-cost action-cost-inline">
+            <SquareGemChip color={color} />
+            <span>{noble.requirements[color]}</span>
+          </span>
+        ))}
+      </span>
+    </>
+  );
+}
+
 export function actionTextLabel(actionIdx: number): string {
   if (0 <= actionIdx && actionIdx <= 11) return 'BUY';
   if (12 <= actionIdx && actionIdx <= 14) return 'BUY';
@@ -144,12 +177,7 @@ export function ActionLabel({
     } else if (display.kind === 'pass') {
       content = <span className="action-verb">PASS</span>;
     } else if (display.kind === 'noble') {
-      content = (
-        <>
-          <span className="action-verb">NOBLE</span>
-          <span className="action-meta">#{display.noble_slot ?? 0}</span>
-        </>
-      );
+      content = <NobleActionLabel noble={display.noble ?? nobleBySlot(board, display.noble_slot ?? -1)} slot={display.noble_slot} />;
     }
   } else if (0 <= actionIdx && actionIdx <= 11) {
     const tier = Math.floor(actionIdx / 4) + 1;
@@ -177,12 +205,7 @@ export function ActionLabel({
   } else if (61 <= actionIdx && actionIdx <= 65) {
     content = <TakeLabel verb="RETURN" colors={[actionIdx - 61]} />;
   } else if (66 <= actionIdx && actionIdx <= 68) {
-    content = (
-      <>
-        <span className="action-verb">NOBLE</span>
-        <span className="action-meta">#{actionIdx - 66}</span>
-      </>
-    );
+    content = <NobleActionLabel noble={nobleBySlot(board, actionIdx - 66)} slot={actionIdx - 66} />;
   }
 
   return (
