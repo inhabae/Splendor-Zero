@@ -1981,6 +1981,17 @@ const displayedP0EvalRef = useRef<number | null>(null);
     try {
       const raw = await file.text();
       const saved = JSON.parse(raw) as SavedGameWithDeepAnalysisDTO;
+      if (!selectedCheckpoint) {
+        throw new Error('Please choose a checkpoint before loading a saved game');
+      }
+      const loadPayload: SavedGameWithDeepAnalysisDTO = {
+        ...saved,
+        config: {
+          ...saved.config,
+          checkpoint_id: selectedCheckpoint.id,
+          checkpoint_path: selectedCheckpoint.path,
+        },
+      };
       const restoredCategories: Record<string, DeepAnalysisEntry> = {};
       const restoredSearch: Record<string, DeepAnalysisSearchResult> = {};
       if (saved.deep_analysis) {
@@ -1998,11 +2009,8 @@ const displayedP0EvalRef = useRef<number | null>(null);
       const hasRestoredDeepAnalysis = Object.keys(restoredCategories).length > 0 || Object.keys(restoredSearch).length > 0;
       const nextSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/load', {
         method: 'POST',
-        body: JSON.stringify(saved),
+        body: JSON.stringify(loadPayload),
       });
-      if (nextSnapshot.config?.checkpoint_id) {
-        setCheckpointId(nextSnapshot.config.checkpoint_id);
-      }
       loadedHistoricalMainlineLengthRef.current = nextSnapshot.move_log.length;
       loadedHistoricalMainlineTailSnapshotRef.current = nextSnapshot.move_log.length > 0
         ? nextSnapshot.move_log[nextSnapshot.move_log.length - 1].result_snapshot_index
