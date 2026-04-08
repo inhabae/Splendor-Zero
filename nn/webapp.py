@@ -9,7 +9,7 @@ import copy
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 
 import numpy as np
@@ -1796,8 +1796,13 @@ class GameManager:
                 candidates.append(REPO_ROOT / saved_path)
 
             # Final fallback: locate by checkpoint filename under known checkpoint dir.
-            if saved_path.name:
-                candidates.append(CHECKPOINT_DIR / saved_path.name)
+            basename_candidates = {saved_path.name}
+            windows_name = PureWindowsPath(config.checkpoint_path).name
+            if windows_name:
+                basename_candidates.add(windows_name)
+            for basename in basename_candidates:
+                if basename:
+                    candidates.append(CHECKPOINT_DIR / basename)
 
             for candidate in candidates:
                 if candidate.exists():
@@ -2592,22 +2597,16 @@ class GameManager:
             model = self._get_model_locked(config, device=search_device)
             search_env = env.clone()
             search_step = search_env.get_state()
-            root_player_id = int(search_step.current_player_id)
-            forced_step = None
-            forced_turn_switches = False
             if forced_root_action_idx is not None:
                 if continuous_until_cancel:
                     raise HTTPException(status_code=400, detail="Forced-root search does not support continuous mode")
                 if not bool(search_step.mask[forced_root_action_idx]):
                     raise HTTPException(status_code=400, detail="Forced root action is illegal")
-                forced_step = search_env.step(forced_root_action_idx)
-                forced_turn_switches = int(forced_step.current_player_id) != root_player_id
-                search_step = forced_step
 
             # Use determinization seed for consistent searches
             search_rng = random.Random(self._determinization_seed) if self._determinization_seed is not None else self._rng
 
-            turns_taken = int(self._turn_index) + (1 if forced_root_action_idx is not None else 0)
+            turns_taken = int(self._turn_index)
 
             def _run() -> int:
                 with self._lock:
@@ -2624,27 +2623,6 @@ class GameManager:
                     cur_job.status = "RUNNING"
 
                 try:
-                    if forced_root_action_idx is not None and forced_step is not None and forced_step.is_terminal:
-                        forced_q = _terminal_value_for_player(int(forced_step.winner), root_player_id)
-                        with self._lock:
-                            cur_job = self._jobs.get(job.job_id)
-                            if cur_job is None:
-                                raise RuntimeError("Engine job disappeared")
-                            if cur_job.cancel_event.is_set():
-                                cur_job.status = "CANCELLED"
-                                raise RuntimeError("Engine job cancelled")
-                            cur_job.action_idx = int(forced_root_action_idx)
-                            cur_job.action_details = []
-                            cur_job.model_action_details = None
-                            cur_job.root_value = float(forced_q)
-                            cur_job.selected_action_q = float(forced_q)
-                            cur_job.total_simulations = 0
-                            cur_job.search_type = search_type if search_type in ("mcts", "ismcts") else "mcts"
-                            cur_job.status = "DONE"
-                            if self._active_job_id == job.job_id:
-                                self._active_job_id = None
-                        return int(forced_root_action_idx)
-
                     accumulated_visits = np.zeros_like(search_step.mask, dtype=np.float64)
                     accumulated_weighted_q = np.zeros_like(search_step.mask, dtype=np.float64)
                     latest_q_values = np.zeros_like(search_step.mask, dtype=np.float32)
@@ -2680,10 +2658,11 @@ class GameManager:
                                 config=MCTSConfig(
                                     num_simulations=chunk_simulations,
                                     c_puct=1.25,
-                                    temperature_moves=0,
-                                    temperature=0.0,
-                                    root_dirichlet_noise=False,
-                                ),
+                                temperature_moves=0,
+                                temperature=0.0,
+                                root_dirichlet_noise=False,
+                                forced_root_action_idx=forced_root_action_idx,
+                            ),
                                 rng=search_rng,
                             )
                         else:
@@ -2697,6 +2676,7 @@ class GameManager:
                                     num_simulations=chunk_simulations,
                                     c_puct=1.25,
                                     eval_batch_size=1,
+                                    forced_root_action_idx=forced_root_action_idx,
                                 ),
                                 rng=search_rng,
                             )
@@ -2747,7 +2727,7 @@ class GameManager:
 
                         if forced_root_action_idx is not None:
                             selected_action_idx = int(forced_root_action_idx)
-                            selected_action_q = float(-aggregated_root if forced_turn_switches else aggregated_root)
+                            selected_action_q = float(aggregated_q_values[forced_root_action_idx])
                             action_details = []
                         else:
                             model_eval = _evaluate_model_replay_state(
@@ -2775,7 +2755,7 @@ class GameManager:
                                 raise RuntimeError("Engine job cancelled")
                             cur_job.action_idx = selected_action_idx
                             cur_job.action_details = action_details
-                            cur_job.root_value = float(selected_action_q if forced_root_action_idx is not None else aggregated_root)
+                            cur_job.root_value = float(aggregated_root)
                             cur_job.selected_action_q = float(selected_action_q)
                             cur_job.total_simulations = int(total_simulations)
                             cur_job.search_type = search_type if search_type in ("mcts", "ismcts") else "mcts"

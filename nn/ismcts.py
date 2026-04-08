@@ -19,6 +19,7 @@ class ISMCTSConfig:
     eps: float = 1e-8
     eval_batch_size: int = 32
     root_parallel_workers: int = 1
+    forced_root_action_idx: int | None = None
 
 
 def _batch_evaluator(model: Any, states_np: np.ndarray, masks_np: np.ndarray, *, device: str):
@@ -85,7 +86,16 @@ def run_ismcts(
 
     # Fast path: if every legal root action ends the game immediately, compute exact
     # values directly from the rules instead of relying on neural leaf evaluation.
-    legal_actions = np.flatnonzero(np.asarray(state.mask, dtype=bool))
+    legal_mask = np.asarray(state.mask, dtype=bool).copy()
+    if cfg.forced_root_action_idx is not None:
+        forced_idx = int(cfg.forced_root_action_idx)
+        if forced_idx < 0 or forced_idx >= ACTION_DIM:
+            raise ValueError("forced_root_action_idx out of bounds")
+        if not bool(legal_mask[forced_idx]):
+            raise ValueError("forced_root_action_idx must be legal at the root")
+        legal_mask[:] = False
+        legal_mask[forced_idx] = True
+    legal_actions = np.flatnonzero(legal_mask)
     if legal_actions.size == 0:
         raise RuntimeError("run_ismcts found no legal actions at non-terminal root")
     exact_q_values = np.zeros((ACTION_DIM,), dtype=np.float32)
@@ -125,6 +135,7 @@ def run_ismcts(
         eval_batch_size=int(cfg.eval_batch_size),
         rng_seed=int(py_rng.getrandbits(64)),
         root_parallel_workers=int(cfg.root_parallel_workers),
+        forced_root_action_idx=(int(cfg.forced_root_action_idx) if cfg.forced_root_action_idx is not None else -1),
     )
 
     visit_probs = np.asarray(native_result.visit_probs, dtype=np.float32)

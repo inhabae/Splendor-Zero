@@ -246,6 +246,7 @@ const [displayedP0EvalValue, setDisplayedP0EvalValue] = useState<number | null>(
   const variationBranchIdCounterRef = useRef<number>(1);
   const loadedHistoricalMainlineLengthRef = useRef<number>(0);
   const loadedHistoricalMainlineTailSnapshotRef = useRef<number>(0);
+  const loadedSavedGameRef = useRef<SavedGameWithDeepAnalysisDTO | null>(null);
   const loadInputRef = useRef<HTMLInputElement | null>(null);
   const analysisSettingsRef = useRef<HTMLDivElement | null>(null);
   const moveLogGridRef = useRef<HTMLDivElement | null>(null);
@@ -857,6 +858,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setRevealSelections({});
     setActiveRevealKey(null);
     setLoadedMoveLog(null);
+    loadedSavedGameRef.current = null;
     loadedHistoricalMainlineLengthRef.current = 0;
     loadedHistoricalMainlineTailSnapshotRef.current = 0;
     setLoadedPlayerNames(null);
@@ -905,6 +907,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setJobStatus(null);
     setSnapshot(null);
     setLoadedMoveLog(null);
+    loadedSavedGameRef.current = null;
     loadedHistoricalMainlineLengthRef.current = 0;
     loadedHistoricalMainlineTailSnapshotRef.current = 0;
     setLoadedPlayerNames(null);
@@ -926,6 +929,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setJobStatus(null);
     setSnapshot(null);
     setLoadedMoveLog(null);
+    loadedSavedGameRef.current = null;
     loadedHistoricalMainlineLengthRef.current = 0;
     loadedHistoricalMainlineTailSnapshotRef.current = 0;
     setLoadedPlayerNames(null);
@@ -1040,6 +1044,19 @@ const displayedP0EvalRef = useRef<number | null>(null);
     }
   }
 
+  async function restoreSnapshotForDeepAnalysis(targetSnapshotIndex: number): Promise<GameSnapshotDTO> {
+    if (loadedSavedGameRef.current != null) {
+      await fetchJSON<GameSnapshotDTO>('/api/game/load', {
+        method: 'POST',
+        body: JSON.stringify(loadedSavedGameRef.current),
+      });
+    }
+    return fetchJSON<GameSnapshotDTO>('/api/game/jump-to-snapshot', {
+      method: 'POST',
+      body: JSON.stringify({ snapshot_index: targetSnapshotIndex }),
+    });
+  }
+
   async function onRunDeepAnalysis(): Promise<void> {
     if (!snapshot || moveLogEntries.length === 0 || isDeepAnalysisRunning || deepAnalysisSimulations < 1) {
       return;
@@ -1064,10 +1081,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
         const move = targets[idx];
         const moveKey = moveAnalysisKey(move);
         const beforeSnapshotIndex = Math.max(0, move.result_snapshot_index - 1);
-        await fetchJSON<GameSnapshotDTO>('/api/game/jump-to-snapshot', {
-          method: 'POST',
-          body: JSON.stringify({ snapshot_index: beforeSnapshotIndex }),
-        });
+        await restoreSnapshotForDeepAnalysis(beforeSnapshotIndex);
         const prerequisiteMoves = targets.slice(0, idx).filter((candidate) =>
           candidate.result_snapshot_index === move.result_snapshot_index,
         );
@@ -1112,10 +1126,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
       setError((err as Error).message);
     } finally {
       try {
-        const restoredSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/jump-to-snapshot', {
-          method: 'POST',
-          body: JSON.stringify({ snapshot_index: startSnapshotIndex }),
-        });
+        const restoredSnapshot = await restoreSnapshotForDeepAnalysis(startSnapshotIndex);
         await handleSnapshotUpdate(restoredSnapshot);
       } catch {
         // Keep current state if restore fails.
@@ -1964,6 +1975,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     clearPolling();
     setJobStatus(null);
     setLoadedMoveLog(null);
+    loadedSavedGameRef.current = null;
     loadedHistoricalMainlineLengthRef.current = 0;
     loadedHistoricalMainlineTailSnapshotRef.current = 0;
     setLoadedPlayerNames(parsePlayerNamesFromFilename(file.name));
@@ -1992,6 +2004,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
           checkpoint_path: selectedCheckpoint.path,
         },
       };
+      loadedSavedGameRef.current = loadPayload;
       const restoredCategories: Record<string, DeepAnalysisEntry> = {};
       const restoredSearch: Record<string, DeepAnalysisSearchResult> = {};
       if (saved.deep_analysis) {

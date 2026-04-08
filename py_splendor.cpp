@@ -844,7 +844,8 @@ public:
         int eval_batch_size = 32,
         std::uint64_t rng_seed = 0,
         bool use_forced_playouts = false,
-        float forced_playouts_k = 2.0f
+        float forced_playouts_k = 2.0f,
+        int forced_root_action_idx = -1
     ) const {
         ensure_initialized();
         return run_native_mcts(
@@ -862,7 +863,8 @@ public:
             eval_batch_size,
             rng_seed,
             use_forced_playouts,
-            forced_playouts_k
+            forced_playouts_k,
+            forced_root_action_idx
         );
     }
 
@@ -873,7 +875,8 @@ public:
         float eps = 1e-8f,
         int eval_batch_size = 32,
         std::uint64_t rng_seed = 0,
-        int root_parallel_workers = 1
+        int root_parallel_workers = 1,
+        int forced_root_action_idx = -1
     ) const {
         ensure_initialized();
         return run_native_ismcts(
@@ -884,7 +887,8 @@ public:
             eps,
             eval_batch_size,
             rng_seed,
-            root_parallel_workers
+            root_parallel_workers,
+            forced_root_action_idx
         );
     }
 
@@ -1337,7 +1341,8 @@ PYBIND11_MODULE(splendor_native, m) {
             py::arg("eval_batch_size") = 32,
             py::arg("rng_seed") = static_cast<std::uint64_t>(0),
             py::arg("use_forced_playouts") = false,
-            py::arg("forced_playouts_k") = 2.0f
+            py::arg("forced_playouts_k") = 2.0f,
+            py::arg("forced_root_action_idx") = -1
         )
         .def(
             "run_ismcts",
@@ -1348,7 +1353,8 @@ PYBIND11_MODULE(splendor_native, m) {
             py::arg("eps") = 1e-8f,
             py::arg("eval_batch_size") = 32,
             py::arg("rng_seed") = static_cast<std::uint64_t>(0),
-            py::arg("root_parallel_workers") = 1
+            py::arg("root_parallel_workers") = 1,
+            py::arg("forced_root_action_idx") = -1
         )
         .def(
             "solve_endgame",

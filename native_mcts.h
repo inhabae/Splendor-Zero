@@ -40,7 +40,8 @@ NativeMCTSResult run_native_mcts(
     int eval_batch_size = 32,
     std::uint64_t rng_seed = 0,
     bool use_forced_playouts = false,
-    float forced_playouts_k = 2.0f
+    float forced_playouts_k = 2.0f,
+    int forced_root_action_idx = -1
 );
 
 NativeMCTSResult run_native_ismcts(
@@ -51,5 +52,6 @@ NativeMCTSResult run_native_ismcts(
     float eps = 1e-8f,
     int eval_batch_size = 32,
     std::uint64_t rng_seed = 0,
-    int root_parallel_workers = 1
+    int root_parallel_workers = 1,
+    int forced_root_action_idx = -1
 );

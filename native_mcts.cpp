@@ -1242,6 +1242,24 @@ NodeMetadata build_node_metadata(const GameState& state) {
     return out;
 }
 
+std::array<std::uint8_t, kActionDim> restrict_root_mask(
+    const std::array<std::uint8_t, kActionDim>& mask,
+    int forced_root_action_idx
+) {
+    if (forced_root_action_idx < 0) {
+        return mask;
+    }
+    if (forced_root_action_idx >= kActionDim) {
+        throw std::invalid_argument("forced_root_action_idx out of bounds");
+    }
+    if (mask[static_cast<std::size_t>(forced_root_action_idx)] == 0) {
+        throw std::invalid_argument("forced_root_action_idx must be legal at the root");
+    }
+    std::array<std::uint8_t, kActionDim> restricted{};
+    restricted[static_cast<std::size_t>(forced_root_action_idx)] = 1;
+    return restricted;
+}
+
 }  // namespace
 
 pybind11::array_t<float> NativeMCTSResult::visit_probs_array() const {
@@ -1271,7 +1289,8 @@ NativeMCTSResult run_native_mcts(
     int eval_batch_size,
     std::uint64_t rng_seed,
     bool use_forced_playouts,
-    float forced_playouts_k
+    float forced_playouts_k,
+    int forced_root_action_idx
 ) {
     if (num_simulations <= 0) {
         throw std::invalid_argument("num_simulations must be positive");
@@ -1293,10 +1312,12 @@ NativeMCTSResult run_native_mcts(
     if (root_data.terminal.is_terminal) {
         throw std::invalid_argument("run_mcts called on terminal state");
     }
+    const std::array<std::uint8_t, kActionDim> root_mask =
+        restrict_root_mask(root_data.mask, forced_root_action_idx);
 
     bool has_legal = false;
     for (int i = 0; i < kActionDim; ++i) {
-        if (root_data.mask[static_cast<std::size_t>(i)] != 0) {
+        if (root_mask[static_cast<std::size_t>(i)] != 0) {
             has_legal = true;
             break;
         }
@@ -1503,7 +1524,7 @@ NativeMCTSResult run_native_mcts(
         PendingLeafEval req;
         req.node_index = 0;
         req.state = state_encoder::encode_state(root_state);
-        req.mask = root_data.mask;
+        req.mask = root_mask;
         pending_root.push_back(std::move(req));
         evaluate_pending(pending_root, root_backups);
     }
@@ -1543,7 +1564,10 @@ NativeMCTSResult run_native_mcts(
                 path.reserve(64);
 
                 while (true) {
-                    const NodeMetadata node_data = build_node_metadata(sim_state);
+                    NodeMetadata node_data = build_node_metadata(sim_state);
+                    if (node_index == 0) {
+                        node_data.mask = root_mask;
+                    }
                     MCTSNode& node = nodes[static_cast<std::size_t>(node_index)];
                     if (node_data.terminal.is_terminal) {
                         ReadyBackup ready;
@@ -1644,7 +1668,10 @@ NativeMCTSResult run_native_mcts(
                         path.reserve(64);
 
                         while (true) {
-                            const NodeMetadata node_data = build_node_metadata(sim_state);
+                            NodeMetadata node_data = build_node_metadata(sim_state);
+                            if (node_index == 0) {
+                                node_data.mask = root_mask;
+                            }
                             if (node_data.terminal.is_terminal) {
                                 ReadyBackup ready;
                                 // Terminal value from the perspective of the current player at terminal state
@@ -1784,14 +1811,14 @@ NativeMCTSResult run_native_mcts(
     result.search_slots_evaluated = completed - 1; // subtract 1 for the pre-expanded root
     result.search_slots_drop_pending_eval = total_slots_drop_pending_eval;
     result.search_slots_drop_no_action = total_slots_drop_no_action;
-    const auto raw_visit_probs = visit_probs_from_counts(root, root_data.mask);
+    const auto raw_visit_probs = visit_probs_from_counts(root, root_mask);
     result.chosen_action_idx = sample_action_from_visits(
-        raw_visit_probs, root_data.mask, turns_taken, temperature_moves, temperature, rng
+        raw_visit_probs, root_mask, turns_taken, temperature_moves, temperature, rng
     );
     if (use_forced_playouts) {
         result.visit_probs = prune_policy_target_visit_probs(
             root,
-            root_data.mask,
+            root_mask,
             c_puct,
             eps,
             forced_playouts_k
@@ -1811,7 +1838,7 @@ NativeMCTSResult run_native_mcts(
     int best_visit_action = -1;
     int best_visit_count = -1;
     for (int a = 0; a < kActionDim; ++a) {
-        if (root_data.mask[static_cast<std::size_t>(a)] == 0) {
+        if (root_mask[static_cast<std::size_t>(a)] == 0) {
             continue;
         }
         const int n = root.visit_count[static_cast<std::size_t>(a)];
@@ -1839,7 +1866,8 @@ NativeMCTSResult run_native_ismcts(
     float eps,
     int eval_batch_size,
     std::uint64_t rng_seed,
-    int root_parallel_workers
+    int root_parallel_workers,
+    int forced_root_action_idx
 ) {
     if (num_simulations <= 0) {
         throw std::invalid_argument("num_simulations must be positive");
@@ -1855,9 +1883,11 @@ NativeMCTSResult run_native_ismcts(
     if (root_data.terminal.is_terminal) {
         throw std::invalid_argument("run_ismcts called on terminal state");
     }
+    const std::array<std::uint8_t, kActionDim> root_mask =
+        restrict_root_mask(root_data.mask, forced_root_action_idx);
     bool has_legal = false;
     for (int i = 0; i < kActionDim; ++i) {
-        if (root_data.mask[static_cast<std::size_t>(i)] != 0) {
+        if (root_mask[static_cast<std::size_t>(i)] != 0) {
             has_legal = true;
             break;
         }
@@ -1866,10 +1896,12 @@ NativeMCTSResult run_native_ismcts(
         throw std::invalid_argument("ISMCTS root has no legal actions");
     }
 
-    ISMCTSNode root_node = evaluate_ismcts_root_node(root_state, root_data, evaluator);
+    NodeMetadata effective_root_data = root_data;
+    effective_root_data.mask = root_mask;
+    ISMCTSNode root_node = evaluate_ismcts_root_node(root_state, effective_root_data, evaluator);
     // Keep boosted root priors, but do not short-circuit search. We want
     // rollout-backed visit/Q statistics even when a blocking reserve exists.
-    apply_root_blocking_prior_adjustment(root_node, root_state, root_data.mask);
+    apply_root_blocking_prior_adjustment(root_node, root_state, root_mask);
 
     const int worker_count = std::min(root_parallel_workers, num_simulations);
     const int key_observer_player = root_state.current_player;
@@ -1889,7 +1921,7 @@ NativeMCTSResult run_native_ismcts(
         pybind11::gil_scoped_release release;
         worker_results[0] = run_native_ismcts_worker(
             root_state,
-            root_data,
+            effective_root_data,
             root_node,
             key_observer_player,
             evaluator,
@@ -1907,7 +1939,7 @@ NativeMCTSResult run_native_ismcts(
             try {
                 worker_results[static_cast<std::size_t>(worker_idx)] = run_native_ismcts_worker(
                     root_state,
-                    root_data,
+                    effective_root_data,
                     root_node,
                     key_observer_player,
                     evaluator,
@@ -1966,12 +1998,12 @@ NativeMCTSResult run_native_ismcts(
     result.search_slots_evaluated = total_slots_evaluated;
     result.search_slots_drop_pending_eval = total_slots_drop_pending_eval;
     result.search_slots_drop_no_action = total_slots_drop_no_action;
-    result.visit_probs = visit_probs_from_counts(root, root_data.mask);
+    result.visit_probs = visit_probs_from_counts(root, root_mask);
 
     int best_action = -1;
     int best_visits = -1;
     for (int a = 0; a < kActionDim; ++a) {
-        if (root_data.mask[static_cast<std::size_t>(a)] == 0) {
+        if (root_mask[static_cast<std::size_t>(a)] == 0) {
             continue;
         }
         const int n = root.visit_count[static_cast<std::size_t>(a)];

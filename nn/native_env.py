@@ -52,12 +52,12 @@ def _try_load_native_module() -> Any | None:
     if build_dir.exists():
         for pattern in patterns:
             for candidate in sorted(build_dir.rglob(pattern)):
-                spec = importlib.util.spec_from_file_location("splendor_native", candidate)
-                if spec is None or spec.loader is None:
-                    continue
-                module = importlib.util.module_from_spec(spec)
-                sys.modules["splendor_native"] = module
                 try:
+                    spec = importlib.util.spec_from_file_location("splendor_native", candidate)
+                    if spec is None or spec.loader is None:
+                        continue
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules["splendor_native"] = module
                     spec.loader.exec_module(module)
                 except Exception:
                     sys.modules.pop("splendor_native", None)

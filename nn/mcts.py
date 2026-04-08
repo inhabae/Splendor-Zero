@@ -23,6 +23,7 @@ class MCTSConfig:
     eval_batch_size: int = 32
     use_forced_playouts: bool = False
     forced_playouts_k: float = 2.0
+    forced_root_action_idx: int | None = None
 
 
 @dataclass
@@ -121,6 +122,9 @@ def run_mcts(
         rng_seed=rng_seed,
         use_forced_playouts=bool(cfg.use_forced_playouts),
         forced_playouts_k=float(cfg.forced_playouts_k),
+        forced_root_action_idx=(
+            int(cfg.forced_root_action_idx) if cfg.forced_root_action_idx is not None else -1
+        ),
     )
     native_result = env.run_mcts_native(
         **native_kwargs,
