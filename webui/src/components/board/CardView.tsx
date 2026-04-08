@@ -2,17 +2,13 @@ import { CardDTO } from '../../types';
 
 const COST_ORDER: Array<keyof CardDTO['cost']> = ['white', 'blue', 'green', 'red', 'black'];
 
-export function CardView({
-  card,
-  showMcts = false,
-  showModel = false,
-  onClick,
-}: {
+export function CardView(props: {
   card: CardDTO;
   showMcts?: boolean;
   showModel?: boolean;
   onClick?: () => void;
 }) {
+  const { card, onClick } = props;
   const isPrivate = card.source === 'reserved_private';
   const isPlaceholder = card.is_placeholder === true;
   const isHiddenReservedCard = isPrivate && isPlaceholder;

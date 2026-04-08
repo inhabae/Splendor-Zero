@@ -168,13 +168,6 @@ function formatEvalBar(value: number | null | undefined): string {
   return value != null && Number.isFinite(value) ? Math.abs(value).toFixed(2) : '--';
 }
 
-function evalClassFromP1Value(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value) || value === 0) {
-    return 'neutral';
-  }
-  return value > 0 ? 'white-side' : 'black-side';
-}
-
 function topMoveEvalClass(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value) || value === 0) {
     return 'neutral';
@@ -188,13 +181,6 @@ function formatTopMoveEval(value: number | null | undefined): string {
   }
   const magnitude = Math.abs(value).toFixed(2);
   return value > 0 ? `+${magnitude}` : `-${magnitude}`;
-}
-
-function isP1Winning(value: number | null | undefined, playerToMove: Seat | null | undefined): boolean | null {
-  if (value == null || !Number.isFinite(value) || playerToMove == null || value === 0) {
-    return null;
-  }
-  return (playerToMove === 'P1' && value > 0) || (playerToMove === 'P0' && value < 0);
 }
 
 function p1WinningEval(value: number | null | undefined, playerToMove: Seat | null | undefined): number | null {
@@ -1283,7 +1269,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     if (highlightedVariation) {
       const activeBranch = variationBranches.find((branch) => branch.id === highlightedVariation.branchId) ?? null;
       const nextMove = activeBranch?.moves[highlightedVariation.moveIndex + 1] ?? null;
-      if (nextMove?.kind === 'move' && nextMove.actionIdx === actionIdx) {
+      if (activeBranch && nextMove?.kind === 'move' && nextMove.actionIdx === actionIdx) {
         await onJumpToVariationMove(activeBranch, highlightedVariation.moveIndex + 1, !autoAnalyzeOnNavigation);
         return;
       }
@@ -2073,12 +2059,6 @@ const displayedP0EvalRef = useRef<number | null>(null);
     };
     evalAnimationFrameRef.current = window.requestAnimationFrame(step);
   }, [p0EvalValue]);
-  const evalBarPercent = useMemo<number>(() => {
-    if (displayedP0EvalValue == null || !Number.isFinite(displayedP0EvalValue)) {
-      return 50;
-    }
-    return Math.max(0, Math.min(100, ((displayedP0EvalValue + 1) / 2) * 100));
-  }, [displayedP0EvalValue]);
   const evalBarTopHeight = useMemo<number>(() => {
     if (displayedP0EvalValue == null || !Number.isFinite(displayedP0EvalValue)) {
       return 50;
@@ -2362,6 +2342,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     if (!activeSnapshot || !keyboardNavigationEnabled || moveLogEntries.length === 0 || isDeepAnalysisRunning) {
       return;
     }
+    const snapshotForKeys: GameSnapshotDTO = activeSnapshot;
 
     function onKeyDown(event: KeyboardEvent): void {
       if (event.defaultPrevented) {
@@ -2384,7 +2365,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
 
       if (event.key === 'ArrowUp') {
         event.preventDefault();
-        if (activeSnapshot.current_snapshot_index == null) {
+        if (snapshotForKeys.current_snapshot_index == null) {
           void onJumpToTurn(0, false, !autoAnalyzeOnNavigation);
           return;
         }
@@ -2393,7 +2374,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
       }
 
       if (event.key === 'ArrowDown') {
-        const useTurnNavigation = activeSnapshot.current_snapshot_index == null;
+        const useTurnNavigation = snapshotForKeys.current_snapshot_index == null;
         const finalSnapshotIndex = useTurnNavigation
           ? (mainlineMoveTurnIndices.length > 0 ? mainlineMoveTurnIndices[mainlineMoveTurnIndices.length - 1] : 0)
           : (mainlineMoveSnapshotIndices.length > 0 ? mainlineMoveSnapshotIndices[mainlineMoveSnapshotIndices.length - 1] : 0);

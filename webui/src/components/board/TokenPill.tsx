@@ -2,7 +2,8 @@ import { ColorCountsDTO, TokenCountsDTO } from '../../types';
 
 type TokenKey = keyof TokenCountsDTO;
 
-export function TokenPill({ color, count, showMcts = false, showModel = false }: { color: TokenKey; count: number; showMcts?: boolean; showModel?: boolean }) {
+export function TokenPill(props: { color: TokenKey; count: number; showMcts?: boolean; showModel?: boolean }) {
+  const { color, count } = props;
   return (
     <div className={`token-pill token-${color} ${count === 0 ? 'is-zero-count' : ''}`} aria-label={`${color} token count ${count}`}>
       <span className="token-pill-count">{count}</span>
