@@ -43,3 +43,5 @@ tests/*
 # !tests/test_native_env_hydration.py
 # !tests/test_spendee_bridge.py
 nn_artifacts/
+
+.tmp*
