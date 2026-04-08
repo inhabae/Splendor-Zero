@@ -40,6 +40,11 @@ body {
   --board-area-height: clamp(620px, calc(100vh - 150px), 780px);
 }
 
+.app-shell.app-shell-board.board-only-mode {
+  justify-content: center;
+  align-items: center;
+}
+
 h1,
 h2,
 h3,
@@ -271,6 +276,20 @@ button:disabled {
   overflow: hidden;
 }
 
+.game-layout.board-only-mode {
+  display: block;
+}
+
+.app-shell.app-shell-board.board-only-mode .panel.game-layout.board-only-mode {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .board-column,
 .engine-column {
   min-width: 0;
@@ -282,6 +301,11 @@ button:disabled {
   flex: 0 0 auto;
   height: var(--board-area-height);
   min-height: 0;
+}
+
+.game-layout.board-only-mode .board-column {
+  width: fit-content;
+  margin: 0 auto;
 }
 
 .engine-column {

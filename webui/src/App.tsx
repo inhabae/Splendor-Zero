@@ -221,6 +221,7 @@ export function App() {
   const [activeRevealKey, setActiveRevealKey] = useState<string | null>(null);
   const [showBoardAnalysis, setShowBoardAnalysis] = useState(true);
   const [showAnalysisSettings, setShowAnalysisSettings] = useState(false);
+  const [hideAllExceptBoard, setHideAllExceptBoard] = useState(false);
 
   const [snapshot, setSnapshot] = useState<GameSnapshotDTO | null>(null);
   const [loadedMoveLog, setLoadedMoveLog] = useState<MoveLogEntryDTO[] | null>(null);
@@ -2632,6 +2633,32 @@ const displayedP0EvalRef = useRef<number | null>(null);
     };
   }, [homeView]);
 
+  useEffect(() => {
+    if (!hideAllExceptBoard) {
+      return;
+    }
+
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key !== 'Enter') {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof HTMLElement
+        && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setHideAllExceptBoard(false);
+    }
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [hideAllExceptBoard]);
+
   const isBoardView = (homeView === 'QUICK' || isSetupLikeView || homeView === 'LIVE') && snapshot;
 
   function renderMoveContent(move: MoveLogDisplayEntry): JSX.Element {
@@ -2673,7 +2700,8 @@ const displayedP0EvalRef = useRef<number | null>(null);
     );
   }
   return (
-    <main className={`app-shell ${isBoardView ? 'app-shell-board' : ''}`}>
+    <main className={`app-shell ${isBoardView ? 'app-shell-board' : ''} ${hideAllExceptBoard ? 'board-only-mode' : ''}`}>
+      {!hideAllExceptBoard && (
       <header>
         <h1>AhinLab</h1>
         <div className="header-actions">
@@ -2722,6 +2750,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
           )}
         </div>
       </header>
+      )}
 
       {homeView === 'HOME' && (
         <section className="home-landing">
@@ -2809,15 +2838,15 @@ const displayedP0EvalRef = useRef<number | null>(null);
       )}
 
       {isBoardView && (
-        <section className="panel game-layout">
+        <section className={`panel game-layout ${hideAllExceptBoard ? 'board-only-mode' : ''}`}>
           <div className="board-column">
             <div className="board-analysis-shell">
               <div
-                className={`eval-bar-wrap ${showBoardAnalysis ? '' : 'hidden'}`}
+                className={`eval-bar-wrap ${showBoardAnalysis && !hideAllExceptBoard ? '' : 'hidden'}`}
                 aria-label="Evaluation bar"
-                aria-hidden={!showBoardAnalysis}
+                aria-hidden={!showBoardAnalysis || hideAllExceptBoard}
               >
-                {showBoardAnalysis && (
+                {showBoardAnalysis && !hideAllExceptBoard && (
                   <>
                     <div className="eval-bar">
                       <div className="eval-bar-top" style={{ height: `${evalBarTopHeight}%` }} />
@@ -2855,6 +2884,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
             </div>
           </div>
 
+          {!hideAllExceptBoard && (
           <aside className="engine-column">
             <div className="engine-box">
               <div className="analysis-panel-tabs" role="tablist" aria-label="Analysis panel sections">
@@ -2954,6 +2984,22 @@ const displayedP0EvalRef = useRef<number | null>(null);
                           />
                         </div>
                       )}
+                      <div className="analysis-settings-section">
+                        <label className="analysis-toggle">
+                          <input
+                            type="checkbox"
+                            checked={hideAllExceptBoard}
+                            onChange={(event) => {
+                              const nextValue = event.target.checked;
+                              setHideAllExceptBoard(nextValue);
+                              if (nextValue) {
+                                setShowAnalysisSettings(false);
+                              }
+                            }}
+                          />
+                          <span>Hide all except board</span>
+                        </label>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -3239,6 +3285,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
               </div>
             </div>
           </aside>
+          )}
         </section>
       )}
 
