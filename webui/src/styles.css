@@ -853,13 +853,13 @@ button:disabled {
 .tier-deck-badge-2 .tier-deck-stack::before,
 .tier-deck-badge-2 .tier-deck-stack::after,
 .tier-deck-badge-2 .tier-deck-face {
-  background: #be8b26;
+  background: #d4b548;
 }
 
 .tier-deck-badge-3 .tier-deck-stack::before,
 .tier-deck-badge-3 .tier-deck-stack::after,
 .tier-deck-badge-3 .tier-deck-face {
-  background: #4e79c8;
+  background: #465ca5;
 }
 
 .tier-deck-pips {
@@ -867,11 +867,12 @@ button:disabled {
   gap: 0.24rem;
   width: 100%;
   justify-content: center;
+  transform: translate(2px, 1px);
 }
 
 .tier-deck-pips span {
-  width: clamp(8px, 16%, 11px);
-  height: clamp(8px, 16%, 11px);
+  width: clamp(6px, 12%, 8px);
+  height: clamp(6px, 12%, 8px);
   flex: 0 0 auto;
   border-radius: 999px;
   background: #ffffff;
@@ -1001,6 +1002,9 @@ button:disabled {
 
 .card-hidden-reserved {
   grid-template-rows: 1fr;
+  border-color: #8f8a80;
+  box-shadow: inset 0 0 0 9999px rgba(255, 255, 255, 0.08), 0 8px 18px rgba(0, 0, 0, 0.22);
+  background: linear-gradient(180deg, #ddd9cf 0%, #d5d0c5 100%) !important;
 }
 
 .card-hidden-reserved .card-costs {
@@ -1012,6 +1016,50 @@ button:disabled {
   padding-left: 0;
 }
 
+.card-hidden-reserved-tier-1 {
+  background:
+    linear-gradient(180deg, #2b9b64 0%, #238654 100%),
+    linear-gradient(180deg, #e3dfd6 0%, #d5d0c5 100%) !important;
+}
+
+.card-hidden-reserved-tier-2 {
+  background:
+    linear-gradient(180deg, #c89329 0%, #ae7c1e 100%),
+    linear-gradient(180deg, #e3dfd6 0%, #d5d0c5 100%) !important;
+}
+
+.card-hidden-reserved-tier-3 {
+  background:
+    linear-gradient(180deg, #4f79c7 0%, #3d63aa 100%),
+    linear-gradient(180deg, #e3dfd6 0%, #d5d0c5 100%) !important;
+}
+
+.card-hidden-reserved-tier-1,
+.card-hidden-reserved-tier-2,
+.card-hidden-reserved-tier-3 {
+  background-size: 100% 100%, 58% 14%;
+  background-repeat: no-repeat;
+  background-position: center center, center 69%;
+}
+
+.card-hidden-reserved-markers {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.34rem;
+  padding-top: 5.35rem;
+}
+
+.card-hidden-reserved-markers span {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #f7f4ec;
+  border: 1px solid rgba(46, 54, 62, 0.35);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
 .card-hidden-reserved .card-placeholder-mark {
   font-size: 3rem;
 }
@@ -1021,6 +1069,54 @@ button:disabled {
 .card-private.card-green { background: color-mix(in srgb, var(--splendor-green) 72%, #8e8e8e 28%) !important; }
 .card-private.card-red { background: color-mix(in srgb, var(--splendor-red) 72%, #8e8e8e 28%) !important; }
 .card-private.card-black { background: color-mix(in srgb, var(--splendor-black) 72%, #8e8e8e 28%) !important; }
+
+.card-private.card-hidden-reserved.card-hidden-reserved-tier-1 {
+  background:
+    linear-gradient(180deg, #2b9b64 0%, #238654 100%),
+    linear-gradient(180deg, #e3dfd6 0%, #d5d0c5 100%) !important;
+}
+
+.card-private.card-hidden-reserved.card-hidden-reserved-tier-2 {
+  background:
+    linear-gradient(180deg, #c89329 0%, #ae7c1e 100%),
+    linear-gradient(180deg, #e3dfd6 0%, #d5d0c5 100%) !important;
+}
+
+.card-private.card-hidden-reserved.card-hidden-reserved-tier-3 {
+  background:
+    linear-gradient(180deg, #4f79c7 0%, #3d63aa 100%),
+    linear-gradient(180deg, #e3dfd6 0%, #d5d0c5 100%) !important;
+}
+
+.card-placeholder.card-hidden-reserved.card-hidden-reserved-tier-1 {
+  background:
+    linear-gradient(180deg, #2b9b64 0%, #238654 100%),
+    linear-gradient(180deg, #e3dfd6 0%, #d5d0c5 100%) !important;
+}
+
+.card-placeholder.card-hidden-reserved.card-hidden-reserved-tier-2 {
+  background:
+    linear-gradient(180deg, #c89329 0%, #ae7c1e 100%),
+    linear-gradient(180deg, #e3dfd6 0%, #d5d0c5 100%) !important;
+}
+
+.card-placeholder.card-hidden-reserved.card-hidden-reserved-tier-3 {
+  background:
+    linear-gradient(180deg, #4f79c7 0%, #3d63aa 100%),
+    linear-gradient(180deg, #e3dfd6 0%, #d5d0c5 100%) !important;
+}
+
+.card-hidden-reserved-tier-1 {
+  border-color: #2c9a63;
+}
+
+.card-hidden-reserved-tier-2 {
+  border-color: #be8b26;
+}
+
+.card-hidden-reserved-tier-3 {
+  border-color: #4e79c8;
+}
 
 .overlay-badges {
   display: flex;
