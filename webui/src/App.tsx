@@ -1187,6 +1187,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setError(null);
     clearPolling();
     setJobStatus(null);
+    setUiStatus('WAITING_PLAYER');
     try {
       const result = await fetchJSON<PlayerMoveResponse>('/api/game/player-move', {
         method: 'POST',
@@ -1519,6 +1520,25 @@ const displayedP0EvalRef = useRef<number | null>(null);
     clearPolling();
     setJobStatus(null);
     activeVariationBranchIdRef.current = null;
+
+    try {
+      // Appended post-load mainline moves now live in backend snapshot history,
+      // so prefer a direct snapshot jump instead of replaying from the tail.
+      const directSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/jump-to-snapshot', {
+        method: 'POST',
+        body: JSON.stringify({ snapshot_index: snapshotIndex }),
+      });
+      const shouldSuppressAutoAnalyze = suppressAutoAnalyze || isLoadedPostAnalysisGame;
+      if (shouldSuppressAutoAnalyze) {
+        lastAutoAnalyzeKeyRef.current = autoAnalyzeKey(directSnapshot);
+      }
+      await handleSnapshotUpdate(directSnapshot, false, null, shouldSuppressAutoAnalyze);
+      return;
+    } catch {
+      // Older sessions can still require replaying the extension from the
+      // loaded historical tail. Fall back to that slower path only if a
+      // direct snapshot jump is unavailable.
+    }
 
     try {
       let nextSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/jump-to-snapshot', {

@@ -56,6 +56,7 @@ CHECKPOINT_DIR = REPO_ROOT / "nn_artifacts" / "checkpoints"
 SELFPLAY_DIR = REPO_ROOT / "nn_artifacts" / "selfplay"
 WEB_DIST_DIR = REPO_ROOT / "webui" / "dist"
 SPENDEE_LIVE_SAVE_PATH = REPO_ROOT / "nn_artifacts" / "spendee_bridge" / "webui_save.json"
+ENGINE_JOB_CANCEL_CHECK_CHUNK = 1_000
 _STANDARD_CARD_TIER_BY_ID = {
     int(card["id"]): int(card["tier"])
     for card in list_standard_cards()
@@ -2350,11 +2351,16 @@ class GameManager:
         action_idx = int(action_idx)
         label = _describe_action(action_idx)
         result_turn_index = self._turn_index + 1
+        result_snapshot_index = (
+            int(self._snapshot_history_index) + 1
+            if self._snapshot_history_index is not None and self._snapshot_history
+            else result_turn_index
+        )
         self._move_log.append(
             MoveLogEntry(
                 turn_index=self._turn_index,
                 result_turn_index=result_turn_index,
-                result_snapshot_index=result_turn_index,
+                result_snapshot_index=result_snapshot_index,
                 actor=actor,
                 action_idx=action_idx,
                 label=label,
@@ -2368,6 +2374,18 @@ class GameManager:
                 self._pending_reveals.append(pending)
 
     def _record_event_locked(self, event: GameEvent) -> None:
+        if self._snapshot_history_index is not None and self._snapshot_history:
+            del self._snapshot_history[self._snapshot_history_index + 1:]
+            self._snapshot_history.append(
+                SavedStateDTO(
+                    turn_index=int(self._turn_index),
+                    exported_state=self._ensure_env_locked().export_state(),
+                )
+            )
+            self._snapshot_history_index = len(self._snapshot_history) - 1
+            self._event_log = []
+            self._redo_log = []
+            return
         self._clear_snapshot_history_locked()
         if event.kind in ("reveal_card", "reveal_reserved_card", "reveal_noble") and not self._move_log:
             self._setup_event_log.append(event)
@@ -2488,6 +2506,7 @@ class GameManager:
             env, config, _ = self._require_game_locked()
             if self._forced_winner is not None:
                 raise HTTPException(status_code=400, detail="Game already finished")
+            self._cancel_active_job_locked()
             self._ensure_no_pending_reveals_locked()
 
             step = env.get_state()
@@ -2648,7 +2667,7 @@ class GameManager:
                         remaining = max_total_simulations - total_simulations
                         if remaining <= 0:
                             break
-                        chunk_simulations = min(num_simulations, remaining)
+                        chunk_simulations = min(num_simulations, remaining, ENGINE_JOB_CANCEL_CHECK_CHUNK)
                         import time
                         start_time = time.time()
                         if search_type == "mcts":
@@ -3069,8 +3088,7 @@ class GameManager:
     def jump_to_snapshot(self, req: JumpToSnapshotRequest) -> GameSnapshotDTO:
         with self._lock:
             self._require_game_locked()
-            using_loaded_history = bool(self._loaded_snapshot_history)
-            history_source = self._loaded_snapshot_history if using_loaded_history else self._snapshot_history
+            history_source = self._snapshot_history if self._snapshot_history else self._loaded_snapshot_history
             if not history_source:
                 raise HTTPException(status_code=400, detail="No saved snapshots available")
 
@@ -3079,8 +3097,6 @@ class GameManager:
                 raise HTTPException(status_code=400, detail=f"snapshot_index must be in [0, {len(history_source) - 1}]")
 
             self._cancel_active_job_locked()
-            # Restore active snapshot history from the originally loaded mainline
-            # so users can jump back to canonical positions after branching.
             self._restore_snapshot_history_position_locked(history_source, target_index)
             return self._snapshot_locked()
 
