@@ -420,6 +420,30 @@ const displayedP0EvalRef = useRef<number | null>(null);
     const uniqueInOrder = Array.from(new Set(indices));
     return [0, ...uniqueInOrder];
   }, [moveLogEntries]);
+  const isLoadedMainlineExtensionState = useMemo<boolean>(() => {
+    return Boolean(
+      snapshot &&
+      loadedHistoricalMainlineLengthRef.current > 0 &&
+      snapshot.current_snapshot_index == null &&
+      currentSnapshotIndex > loadedHistoricalMainlineTailSnapshotRef.current
+    );
+  }, [snapshot, currentSnapshotIndex]);
+  const useTurnNavigationForVisibleMainline = Boolean(snapshot?.current_snapshot_index == null && !isLoadedMainlineExtensionState);
+  const visibleMainlineTargets = useMemo<number[]>(() => {
+    return useTurnNavigationForVisibleMainline ? mainlineMoveTurnIndices : mainlineMoveSnapshotIndices;
+  }, [useTurnNavigationForVisibleMainline, mainlineMoveTurnIndices, mainlineMoveSnapshotIndices]);
+  const visibleMainlinePosition = useMemo<number>(() => {
+    if (!snapshot) {
+      return 0;
+    }
+    return useTurnNavigationForVisibleMainline ? snapshot.turn_index : currentSnapshotIndex;
+  }, [snapshot, useTurnNavigationForVisibleMainline, currentSnapshotIndex]);
+  const canStepVisibleMainlineBackward = useMemo<boolean>(() => {
+    return visibleMainlineTargets.some((target) => target < visibleMainlinePosition);
+  }, [visibleMainlineTargets, visibleMainlinePosition]);
+  const canStepVisibleMainlineForward = useMemo<boolean>(() => {
+    return visibleMainlineTargets.some((target) => target > visibleMainlinePosition);
+  }, [visibleMainlineTargets, visibleMainlinePosition]);
   const highlightedMove = useMemo<HighlightedMove | null>(() => {
     if (moveLogDisplayEntries.length === 0 || currentSnapshotIndex <= 0) {
       return null;
@@ -1448,12 +1472,83 @@ const displayedP0EvalRef = useRef<number | null>(null);
     }
   }
 
+  async function onJumpToVisibleMainlineStart(suppressAutoAnalyze = false): Promise<void> {
+    if (loadedHistoricalMainlineLengthRef.current > 0) {
+      await onJumpToSnapshot(0, false, suppressAutoAnalyze, false);
+      return;
+    }
+    await onUndoToStart(suppressAutoAnalyze);
+  }
+
+  async function onJumpToVisibleMainlineEnd(suppressAutoAnalyze = false): Promise<void> {
+    const finalSnapshotIndex = mainlineMoveSnapshotIndices.length > 0
+      ? mainlineMoveSnapshotIndices[mainlineMoveSnapshotIndices.length - 1]
+      : 0;
+    if (loadedHistoricalMainlineLengthRef.current > 0) {
+      if (finalSnapshotIndex > loadedHistoricalMainlineTailSnapshotRef.current) {
+        await onJumpToLoadedMainlineExtension(finalSnapshotIndex, suppressAutoAnalyze);
+        return;
+      }
+      await onJumpToSnapshot(finalSnapshotIndex, false, suppressAutoAnalyze, false);
+      return;
+    }
+    await onRedoToEnd(suppressAutoAnalyze);
+  }
+
+  async function onJumpToLoadedMainlineExtension(
+    snapshotIndex: number,
+    suppressAutoAnalyze = false,
+  ): Promise<void> {
+    if (!snapshot) {
+      return;
+    }
+    const historicalLength = loadedHistoricalMainlineLengthRef.current;
+    const historicalTailSnapshot = loadedHistoricalMainlineTailSnapshotRef.current;
+    if (historicalLength <= 0 || snapshotIndex <= historicalTailSnapshot) {
+      await onJumpToSnapshot(snapshotIndex, false, suppressAutoAnalyze, true);
+      return;
+    }
+    const extensionMoves = moveLogEntries.slice(historicalLength);
+    const extensionCount = snapshotIndex - historicalTailSnapshot;
+    if (extensionCount <= 0 || extensionCount > extensionMoves.length) {
+      setError(`Snapshot ${snapshotIndex} is out of bounds for the loaded mainline extension`);
+      return;
+    }
+
+    setError(null);
+    clearPolling();
+    setJobStatus(null);
+    activeVariationBranchIdRef.current = null;
+
+    try {
+      let nextSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/jump-to-snapshot', {
+        method: 'POST',
+        body: JSON.stringify({ snapshot_index: historicalTailSnapshot }),
+      });
+      for (let idx = 0; idx < extensionCount; idx += 1) {
+        const item = extensionMoves[idx];
+        const result = await fetchJSON<PlayerMoveResponse>('/api/game/player-move', {
+          method: 'POST',
+          body: JSON.stringify({ action_idx: item.action_idx }),
+        });
+        nextSnapshot = result.snapshot;
+      }
+      const shouldSuppressAutoAnalyze = suppressAutoAnalyze || isLoadedPostAnalysisGame;
+      if (shouldSuppressAutoAnalyze) {
+        lastAutoAnalyzeKeyRef.current = autoAnalyzeKey(nextSnapshot);
+      }
+      await handleSnapshotUpdate(nextSnapshot, false, null, shouldSuppressAutoAnalyze);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
   async function onStepMainline(delta: -1 | 1, suppressAutoAnalyze = true): Promise<void> {
     if (!snapshot || mainlineMoveSnapshotIndices.length === 0) {
       return;
     }
 
-    const useTurnNavigation = snapshot.current_snapshot_index == null;
+    const useTurnNavigation = snapshot.current_snapshot_index == null && !isLoadedMainlineExtensionState;
     const navigationTargets = useTurnNavigation ? mainlineMoveTurnIndices : mainlineMoveSnapshotIndices;
     const activeSnapshotIndex = useTurnNavigation ? snapshot.turn_index : currentSnapshotIndex;
     let baseIdx = 0;
@@ -1475,6 +1570,13 @@ const displayedP0EvalRef = useRef<number | null>(null);
 
     if (useTurnNavigation) {
       await onJumpToTurn(nextSnapshotIndex, false, suppressAutoAnalyze);
+      return;
+    }
+    if (
+      loadedHistoricalMainlineLengthRef.current > 0 &&
+      nextSnapshotIndex > loadedHistoricalMainlineTailSnapshotRef.current
+    ) {
+      await onJumpToLoadedMainlineExtension(nextSnapshotIndex, suppressAutoAnalyze);
       return;
     }
     await onJumpToSnapshot(nextSnapshotIndex, false, suppressAutoAnalyze, false);
@@ -2369,6 +2471,10 @@ const displayedP0EvalRef = useRef<number | null>(null);
       return;
     }
     const snapshotForKeys: GameSnapshotDTO = activeSnapshot;
+    const isLoadedMainlineExtensionState =
+      loadedHistoricalMainlineLengthRef.current > 0 &&
+      snapshotForKeys.current_snapshot_index == null &&
+      currentSnapshotIndex > loadedHistoricalMainlineTailSnapshotRef.current;
 
     function onKeyDown(event: KeyboardEvent): void {
       if (event.defaultPrevented) {
@@ -2391,7 +2497,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
 
       if (event.key === 'ArrowUp') {
         event.preventDefault();
-        if (snapshotForKeys.current_snapshot_index == null) {
+        if (snapshotForKeys.current_snapshot_index == null && !isLoadedMainlineExtensionState) {
           void onJumpToTurn(0, false, !autoAnalyzeOnNavigation);
           return;
         }
@@ -2400,13 +2506,20 @@ const displayedP0EvalRef = useRef<number | null>(null);
       }
 
       if (event.key === 'ArrowDown') {
-        const useTurnNavigation = snapshotForKeys.current_snapshot_index == null;
+        const useTurnNavigation = snapshotForKeys.current_snapshot_index == null && !isLoadedMainlineExtensionState;
         const finalSnapshotIndex = useTurnNavigation
           ? (mainlineMoveTurnIndices.length > 0 ? mainlineMoveTurnIndices[mainlineMoveTurnIndices.length - 1] : 0)
           : (mainlineMoveSnapshotIndices.length > 0 ? mainlineMoveSnapshotIndices[mainlineMoveSnapshotIndices.length - 1] : 0);
         event.preventDefault();
         if (useTurnNavigation) {
           void onJumpToTurn(finalSnapshotIndex, false, !autoAnalyzeOnNavigation);
+          return;
+        }
+        if (
+          loadedHistoricalMainlineLengthRef.current > 0 &&
+          finalSnapshotIndex > loadedHistoricalMainlineTailSnapshotRef.current
+        ) {
+          void onJumpToLoadedMainlineExtension(finalSnapshotIndex, !autoAnalyzeOnNavigation);
           return;
         }
         void onJumpToSnapshot(finalSnapshotIndex, false, !autoAnalyzeOnNavigation, false);
@@ -2994,7 +3107,14 @@ const displayedP0EvalRef = useRef<number | null>(null);
                             }
                             onClick={() => {
                               if (p0TargetSnapshot != null) {
-                                void onJumpToSnapshot(p0TargetSnapshot, false, !autoAnalyzeOnNavigation);
+                                const isLoadedMainlineExtension =
+                                  loadedHistoricalMainlineLengthRef.current > 0
+                                  && p0TargetSnapshot > loadedHistoricalMainlineTailSnapshotRef.current;
+                                if (isLoadedMainlineExtension) {
+                                  void onJumpToLoadedMainlineExtension(p0TargetSnapshot, !autoAnalyzeOnNavigation);
+                                } else {
+                                  void onJumpToSnapshot(p0TargetSnapshot, false, !autoAnalyzeOnNavigation);
+                                }
                               }
                             }}
                           >
@@ -3013,7 +3133,14 @@ const displayedP0EvalRef = useRef<number | null>(null);
                             }
                             onClick={() => {
                               if (p1TargetSnapshot != null) {
-                                void onJumpToSnapshot(p1TargetSnapshot, false, !autoAnalyzeOnNavigation);
+                                const isLoadedMainlineExtension =
+                                  loadedHistoricalMainlineLengthRef.current > 0
+                                  && p1TargetSnapshot > loadedHistoricalMainlineTailSnapshotRef.current;
+                                if (isLoadedMainlineExtension) {
+                                  void onJumpToLoadedMainlineExtension(p1TargetSnapshot, !autoAnalyzeOnNavigation);
+                                } else {
+                                  void onJumpToSnapshot(p1TargetSnapshot, false, !autoAnalyzeOnNavigation);
+                                }
                               }
                             }}
                           >
@@ -3061,16 +3188,16 @@ const displayedP0EvalRef = useRef<number | null>(null);
 
             <div className="analysis-nav-panel">
               <div className="analysis-nav-row">
-                <button type="button" onClick={() => void onUndoToStart(!autoAnalyzeOnNavigation)} disabled={!snapshot.can_undo} aria-label="First move" title="First move">
+                <button type="button" onClick={() => void onJumpToVisibleMainlineStart(!autoAnalyzeOnNavigation)} disabled={!canStepVisibleMainlineBackward} aria-label="First move" title="First move">
                   {'<<'}
                 </button>
-                <button type="button" onClick={() => void onStepMainline(-1, !autoAnalyzeOnNavigation)} disabled={!snapshot.can_undo}>
+                <button type="button" onClick={() => void onStepMainline(-1, !autoAnalyzeOnNavigation)} disabled={!canStepVisibleMainlineBackward}>
                   {'<'}
                 </button>
-                <button type="button" onClick={() => void onStepMainline(1, !autoAnalyzeOnNavigation)} disabled={!snapshot.can_redo}>
+                <button type="button" onClick={() => void onStepMainline(1, !autoAnalyzeOnNavigation)} disabled={!canStepVisibleMainlineForward}>
                   {'>'}
                 </button>
-                <button type="button" onClick={() => void onRedoToEnd(!autoAnalyzeOnNavigation)} disabled={!snapshot.can_redo} aria-label="Last position" title="Last position">
+                <button type="button" onClick={() => void onJumpToVisibleMainlineEnd(!autoAnalyzeOnNavigation)} disabled={!canStepVisibleMainlineForward} aria-label="Last position" title="Last position">
                   {'>>'}
                 </button>
               </div>

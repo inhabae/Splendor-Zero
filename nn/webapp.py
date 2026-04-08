@@ -614,6 +614,8 @@ def _is_continuation_action(action_idx: int) -> bool:
 
 
 def _manual_reveal_for_action(action_idx: int, actor: str, step_after: StepState) -> PendingReveal | None:
+    if bool(step_after.is_terminal):
+        return None
     if 0 <= action_idx <= 11:
         return PendingReveal(
             zone="faceup_card",
