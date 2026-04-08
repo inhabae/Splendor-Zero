@@ -244,6 +244,8 @@ const [displayedP0EvalValue, setDisplayedP0EvalValue] = useState<number | null>(
   const activeJobIdRef = useRef<string | null>(null);
   const activeVariationBranchIdRef = useRef<number | null>(null);
   const variationBranchIdCounterRef = useRef<number>(1);
+  const loadedHistoricalMainlineLengthRef = useRef<number>(0);
+  const loadedHistoricalMainlineTailSnapshotRef = useRef<number>(0);
   const loadInputRef = useRef<HTMLInputElement | null>(null);
   const analysisSettingsRef = useRef<HTMLDivElement | null>(null);
   const moveLogGridRef = useRef<HTMLDivElement | null>(null);
@@ -666,6 +668,25 @@ const displayedP0EvalRef = useRef<number | null>(null);
     if (nextSnapshot.config?.analysis_mode) {
       setLoadedMoveLog((prev) => {
         const incoming = nextSnapshot.move_log ?? [];
+        const preserveLoadedMainline = activeVariationBranchIdRef.current != null && nextSnapshot.current_snapshot_index == null;
+        if (preserveLoadedMainline && prev && prev.length > 0) {
+          return prev;
+        }
+        const loadedHistoricalLength = loadedHistoricalMainlineLengthRef.current;
+        const loadedHistoricalTailSnapshot = loadedHistoricalMainlineTailSnapshotRef.current;
+        const extendingLoadedMainline =
+          activeVariationBranchIdRef.current == null
+          && nextSnapshot.current_snapshot_index == null
+          && loadedHistoricalLength > 0
+          && incoming.length >= loadedHistoricalLength;
+        if (extendingLoadedMainline) {
+          const prefix = incoming.slice(0, loadedHistoricalLength);
+          const suffix = incoming.slice(loadedHistoricalLength).map((move, idx) => ({
+            ...move,
+            result_snapshot_index: loadedHistoricalTailSnapshot + idx + 1,
+          }));
+          return [...prefix, ...suffix];
+        }
         if (!prev || prev.length === 0) {
           return incoming;
         }
@@ -812,6 +833,8 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setRevealSelections({});
     setActiveRevealKey(null);
     setLoadedMoveLog(null);
+    loadedHistoricalMainlineLengthRef.current = 0;
+    loadedHistoricalMainlineTailSnapshotRef.current = 0;
     setLoadedPlayerNames(null);
     setVariationBranches([]);
     setDeepAnalysisBySnapshot({});
@@ -858,6 +881,8 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setJobStatus(null);
     setSnapshot(null);
     setLoadedMoveLog(null);
+    loadedHistoricalMainlineLengthRef.current = 0;
+    loadedHistoricalMainlineTailSnapshotRef.current = 0;
     setLoadedPlayerNames(null);
     setVariationBranches([]);
     setDeepAnalysisBySnapshot({});
@@ -877,6 +902,8 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setJobStatus(null);
     setSnapshot(null);
     setLoadedMoveLog(null);
+    loadedHistoricalMainlineLengthRef.current = 0;
+    loadedHistoricalMainlineTailSnapshotRef.current = 0;
     setLoadedPlayerNames(null);
     setVariationBranches([]);
     setDeepAnalysisBySnapshot({});
@@ -1147,10 +1174,11 @@ const displayedP0EvalRef = useRef<number | null>(null);
         const label = beforeSnapshot.legal_action_details.find((item) => item.action_idx === actionIdx)?.label ?? `Action ${actionIdx}`;
         const variationCtx = deriveVariationContext(beforeSnapshot, beforeSnapshotIndex, actor);
         const expectedMainlineMove = variationCtx?.expectedMainlineMove ?? null;
+        const isOnMainlineSnapshot = variationCtx?.isOnMainlineSnapshot ?? false;
         const baseFullMoveNumber = variationCtx?.baseFullMoveNumber ?? 1;
 
         if (activeVariationBranchIdRef.current == null) {
-          const isDeviation = expectedMainlineMove != null && expectedMainlineMove.action_idx !== actionIdx;
+          const isDeviation = isOnMainlineSnapshot && expectedMainlineMove != null && expectedMainlineMove.action_idx !== actionIdx;
           if (isDeviation) {
             const branchId = variationBranchIdCounterRef.current++;
             activeVariationBranchIdRef.current = branchId;
@@ -1814,6 +1842,8 @@ const displayedP0EvalRef = useRef<number | null>(null);
     clearPolling();
     setJobStatus(null);
     setLoadedMoveLog(null);
+    loadedHistoricalMainlineLengthRef.current = 0;
+    loadedHistoricalMainlineTailSnapshotRef.current = 0;
     setLoadedPlayerNames(parsePlayerNamesFromFilename(file.name));
     setVariationBranches([]);
     setDeepAnalysisBySnapshot({});
@@ -1851,6 +1881,10 @@ const displayedP0EvalRef = useRef<number | null>(null);
       if (nextSnapshot.config?.checkpoint_id) {
         setCheckpointId(nextSnapshot.config.checkpoint_id);
       }
+      loadedHistoricalMainlineLengthRef.current = nextSnapshot.move_log.length;
+      loadedHistoricalMainlineTailSnapshotRef.current = nextSnapshot.move_log.length > 0
+        ? nextSnapshot.move_log[nextSnapshot.move_log.length - 1].result_snapshot_index
+        : 0;
       setDeepAnalysisBySnapshot(restoredCategories);
       setDeepAnalysisSearchBySnapshot(restoredSearch);
       setIsLoadedPostAnalysisGame(hasRestoredDeepAnalysis);
