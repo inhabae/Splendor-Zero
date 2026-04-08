@@ -15,7 +15,6 @@ from typing import Any, Literal
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -3086,18 +3085,6 @@ class GameManager:
 
 manager = GameManager()
 app = FastAPI(title="Splendor vs MCTS UI API")
-
-_cors_origins_raw = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
-if _cors_origins_raw:
-    _cors_origins = [origin.strip() for origin in _cors_origins_raw.split(",") if origin.strip()]
-    if _cors_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=_cors_origins if "*" not in _cors_origins else ["*"],
-            allow_credentials=False,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
 
 
 @app.get("/api/checkpoints", response_model=list[CheckpointDTO])

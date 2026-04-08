@@ -30,7 +30,6 @@ const POLL_MS = 400;
 const LIVE_POLL_MS = 1000;
 const LIVE_SEARCH_MAX_SIMULATIONS = 500_000;
 const DEFAULT_DEEP_ANALYSIS_SIMULATIONS = 50_000;
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 
 function isContinuationAction(actionIdx: number): boolean {
   return actionIdx >= 61 && actionIdx <= 68;
@@ -100,18 +99,8 @@ function moveAnalysisKey(move: Pick<MoveLogEntryDTO, 'result_snapshot_index' | '
   return `${move.result_snapshot_index}:${move.turn_index}:${move.actor}:${move.action_idx}`;
 }
 
-function apiUrl(path: string): string {
-  if (/^https?:\/\//i.test(path)) {
-    return path;
-  }
-  if (!path.startsWith('/')) {
-    return path;
-  }
-  return API_BASE_URL ? `${API_BASE_URL}${path}` : path;
-}
-
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(apiUrl(url), {
+  const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   });
