@@ -44,12 +44,15 @@ class ShadowState:
     hidden_reserved_tiers: dict[tuple[str, int], int] = field(default_factory=dict)
     hidden_reserved_card_ids: dict[tuple[str, int], int] = field(default_factory=dict)
     action_history: list[int] = field(default_factory=list)
+    visible_noble_slots: dict[int, int] = field(default_factory=dict)
 
     def bootstrap(self, observation: ObservedBoardState) -> None:
         self.last_observation = observation
         self.hidden_reserved_tiers.clear()
         self.hidden_reserved_card_ids.clear()
         self.action_history.clear()
+        self.visible_noble_slots.clear()
+        self._sync_visible_noble_slots(observation)
 
     def recreate_from_observation(self, observation: ObservedBoardState) -> None:
         self.last_observation = observation
@@ -60,6 +63,8 @@ class ShadowState:
                 if slot.state == "hidden" and slot.tier_hint is not None:
                     self.hidden_reserved_tiers[(seat, slot.slot)] = int(slot.tier_hint)
         self.action_history = [0 for _ in range(max(int(observation.turns_count), 0))]
+        self.visible_noble_slots.clear()
+        self._sync_visible_noble_slots(observation)
 
     def _record_hidden_slot(self, seat: str, slot: int, tier: int | None) -> None:
         if tier is None:
@@ -70,6 +75,29 @@ class ShadowState:
 
     def assign_hidden_card_id(self, seat: str, slot: int, card_id: int) -> None:
         self.hidden_reserved_card_ids[(seat, slot)] = int(card_id)
+
+    def _sync_visible_noble_slots(self, observation: ObservedBoardState) -> None:
+        current_noble_ids = [int(noble.noble_id) for noble in observation.visible_nobles]
+        if not current_noble_ids:
+            self.visible_noble_slots.clear()
+            return
+
+        next_slots: dict[int, int] = {}
+        used_slots: set[int] = set()
+        for noble_id in current_noble_ids:
+            prior_slot = self.visible_noble_slots.get(noble_id)
+            if prior_slot in (0, 1, 2) and prior_slot not in used_slots:
+                next_slots[noble_id] = int(prior_slot)
+                used_slots.add(int(prior_slot))
+
+        free_slots = [slot for slot in range(3) if slot not in used_slots]
+        for noble_id in current_noble_ids:
+            if noble_id in next_slots:
+                continue
+            if not free_slots:
+                break
+            next_slots[noble_id] = int(free_slots.pop(0))
+        self.visible_noble_slots = next_slots
 
     def apply_observation(self, observation: ObservedBoardState, *, expected_action_idx: int | None = None) -> None:
         if self.last_observation is None:
@@ -100,6 +128,7 @@ class ShadowState:
                     self.hidden_reserved_tiers.pop((seat, slot_idx), None)
                     self.hidden_reserved_card_ids.pop((seat, slot_idx), None)
 
+        self._sync_visible_noble_slots(observation)
         self.last_observation = observation
 
     def _infer_hidden_tier(
@@ -191,6 +220,10 @@ class ShadowState:
                 "my_player_index": observed.my_player_index,
                 "hidden_reserved_tiers": {
                     f"{seat}:{slot}": tier for (seat, slot), tier in sorted(self.hidden_reserved_tiers.items())
+                },
+                "spendee_visible_noble_slots": {
+                    str(slot): noble_id
+                    for noble_id, slot in sorted(self.visible_noble_slots.items(), key=lambda item: item[1])
                 },
                 "board_version": observed.board_version,
             },

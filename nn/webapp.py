@@ -87,6 +87,13 @@ _TAKE2_PAIRS = (
     (3, 4),
 )
 _COLOR_NAMES = ("white", "blue", "green", "red", "black")
+_STANDARD_NOBLE_ID_BY_SIGNATURE = {
+    (
+        int(noble["points"]),
+        tuple(int(noble["requirements"][color]) for color in _COLOR_NAMES),
+    ): int(noble["id"])
+    for noble in list_standard_nobles()
+}
 _REPLAY_MODEL_CACHE: dict[str, Any] = {}
 _REPLAY_MODEL_CACHE_LOCK = threading.Lock()
 
@@ -577,6 +584,18 @@ def _find_noble(board: BoardStateDTO | None, slot: int) -> NobleDTO | None:
     return next((noble for noble in board.nobles if int(noble.slot if noble.slot is not None else -1) == int(slot)), None)
 
 
+def _compact_noble_slot(board: BoardStateDTO | None, compact_idx: int) -> int:
+    if board is None:
+        return int(compact_idx)
+    nobles = sorted(
+        (noble for noble in board.nobles if noble.slot is not None),
+        key=lambda noble: int(noble.slot),
+    )
+    if 0 <= compact_idx < len(nobles):
+        return int(nobles[compact_idx].slot)
+    return int(compact_idx)
+
+
 def _build_action_display(action_idx: int, board: BoardStateDTO | None, actor: str | None = None) -> ActionDisplayDTO | None:
     action_idx = int(action_idx)
     if 0 <= action_idx <= 11:
@@ -605,7 +624,7 @@ def _build_action_display(action_idx: int, board: BoardStateDTO | None, actor: s
     if 61 <= action_idx <= 65:
         return ActionDisplayDTO(kind="tokens", verb="RETURN", token_colors=[_COLOR_NAMES[action_idx - 61]])
     if 66 <= action_idx <= 68:
-        noble_slot = action_idx - 66
+        noble_slot = _compact_noble_slot(board, action_idx - 66)
         return ActionDisplayDTO(kind="noble", verb="NOBLE", noble_slot=noble_slot, noble=_find_noble(board, noble_slot))
     return ActionDisplayDTO(kind="unknown", verb="UNKNOWN")
 
@@ -1030,6 +1049,58 @@ def _spendee_action_history_len(state: dict[str, Any]) -> int | None:
     return len(hist)
 
 
+def _spendee_visible_noble_slots(state: dict[str, Any]) -> dict[int, int] | None:
+    meta = state.get("metadata") if isinstance(state, dict) else None
+    if not isinstance(meta, dict):
+        return None
+    raw = meta.get("spendee_visible_noble_slots")
+    if not isinstance(raw, dict):
+        return None
+    out: dict[int, int] = {}
+    for slot_raw, noble_id_raw in raw.items():
+        try:
+            slot = int(slot_raw)
+            noble_id = int(noble_id_raw)
+        except (TypeError, ValueError):
+            return None
+        if slot not in (0, 1, 2) or noble_id <= 0:
+            return None
+        out[slot] = noble_id
+    return out
+
+
+def _spendee_visible_noble_slots_by_id(state: dict[str, Any]) -> dict[int, int]:
+    raw = _spendee_visible_noble_slots(state)
+    if not raw:
+        return {}
+    return {int(noble_id): int(slot) for slot, noble_id in raw.items()}
+
+
+def _advance_spendee_visible_noble_slots(
+    prior_slots_by_id: dict[int, int],
+    state: dict[str, Any],
+) -> dict[int, int]:
+    available_noble_ids = _available_noble_ids(state)
+    if not available_noble_ids:
+        return {}
+    next_slots: dict[int, int] = {}
+    used_slots: set[int] = set()
+    for noble_id in available_noble_ids:
+        slot = prior_slots_by_id.get(int(noble_id))
+        if slot in (0, 1, 2) and slot not in used_slots:
+            next_slots[int(noble_id)] = int(slot)
+            used_slots.add(int(slot))
+    free_slots = [slot for slot in range(3) if slot not in used_slots]
+    for noble_id in available_noble_ids:
+        noble_id = int(noble_id)
+        if noble_id in next_slots:
+            continue
+        if not free_slots:
+            break
+        next_slots[noble_id] = int(free_slots.pop(0))
+    return next_slots
+
+
 def _player_cards_by_slot(state: dict[str, Any], player_idx: int) -> dict[int, dict[str, Any]]:
     players = state.get("players")
     if not isinstance(players, list) or player_idx >= len(players):
@@ -1274,6 +1345,41 @@ def _normalize_saved_snapshots_hidden_reserved_cards(snapshots: list["SavedState
                         if int(previous_card_id) not in deck_row:
                             deck_row.append(int(previous_card_id))
                 item["card_id"] = int(actual_card_id)
+    previous_spendee_noble_slots: dict[int, int] = {}
+    for saved in normalized:
+        state = saved.exported_state
+        meta = state.get("metadata") if isinstance(state, dict) else None
+        if not isinstance(meta, dict) or str(meta.get("source")) != "spendee_bridge":
+            continue
+        existing_slots = _spendee_visible_noble_slots(state)
+        if existing_slots:
+            previous_spendee_noble_slots = {
+                int(noble_id): int(slot)
+                for slot, noble_id in existing_slots.items()
+            }
+            continue
+
+        available_noble_ids = _available_noble_ids(state)
+        next_spendee_noble_slots: dict[int, int] = {}
+        used_slots: set[int] = set()
+        for noble_id in available_noble_ids:
+            slot = previous_spendee_noble_slots.get(int(noble_id))
+            if slot in (0, 1, 2) and slot not in used_slots:
+                next_spendee_noble_slots[int(noble_id)] = int(slot)
+                used_slots.add(int(slot))
+        free_slots = [slot for slot in range(3) if slot not in used_slots]
+        for noble_id in available_noble_ids:
+            noble_id = int(noble_id)
+            if noble_id in next_spendee_noble_slots:
+                continue
+            if not free_slots:
+                break
+            next_spendee_noble_slots[noble_id] = int(free_slots.pop(0))
+        meta["spendee_visible_noble_slots"] = {
+            str(slot): noble_id
+            for noble_id, slot in sorted(next_spendee_noble_slots.items(), key=lambda item: item[1])
+        }
+        previous_spendee_noble_slots = next_spendee_noble_slots
     return normalized
 
 
@@ -1467,6 +1573,7 @@ def _decode_board_state(
     player_seat: str,
     pending_reveals: list[PendingReveal] | None = None,
     hidden_deck_card_ids_by_tier: dict[int, list[int]] | None = None,
+    spendee_visible_noble_slots: dict[int, int] | None = None,
 ) -> BoardStateDTO:
     state = np.asarray(step.state, dtype=np.float32)
     if state.shape != (STATE_DIM,):
@@ -1580,12 +1687,40 @@ def _decode_board_state(
 
     bank = _decode_token_counts(_safe_slice(state, BANK_START, 6))
 
-    nobles: list[NobleDTO] = []
+    decoded_nobles: list[tuple[int | None, NobleDTO]] = []
     for i in range(3):
         block = _safe_slice(state, NOBLES_START + i * 5, 5)
         if not np.any(block):
             continue
-        nobles.append(NobleDTO(points=3, requirements=_decode_color_counts(block, scale=4.0, max_hint=4), slot=i))
+        requirements = _decode_color_counts(block, scale=4.0, max_hint=4)
+        noble_id = _STANDARD_NOBLE_ID_BY_SIGNATURE.get(
+            (3, tuple(int(getattr(requirements, color)) for color in _COLOR_NAMES))
+        )
+        decoded_nobles.append((noble_id, NobleDTO(points=3, requirements=requirements, slot=i)))
+
+    nobles: list[NobleDTO] = []
+    if spendee_visible_noble_slots:
+        spendee_visible_noble_slots_by_id = {
+            int(noble_id): int(slot)
+            for slot, noble_id in spendee_visible_noble_slots.items()
+        }
+        used_slots: set[int] = set()
+        remaining: list[NobleDTO] = []
+        for noble_id, noble in decoded_nobles:
+            assigned_slot = None if noble_id is None else spendee_visible_noble_slots_by_id.get(int(noble_id))
+            if assigned_slot in (0, 1, 2) and assigned_slot not in used_slots:
+                nobles.append(noble.model_copy(update={"slot": int(assigned_slot)}))
+                used_slots.add(int(assigned_slot))
+            else:
+                remaining.append(noble)
+        free_slots = [slot for slot in range(3) if slot not in used_slots]
+        for noble in remaining:
+            if not free_slots:
+                nobles.append(noble)
+                continue
+            nobles.append(noble.model_copy(update={"slot": int(free_slots.pop(0))}))
+    else:
+        nobles = [noble for _, noble in decoded_nobles]
 
     tiers: list[TierRowDTO] = []
     for tier in (3, 2, 1):
@@ -1740,6 +1875,7 @@ class GameManager:
         self._loaded_snapshot_history: list[SavedStateDTO] = []
         self._loaded_move_log_full: list[MoveLogEntry] = []
         self._determinization_seed: int | None = None
+        self._spendee_visible_noble_slots_by_id: dict[int, int] = {}
 
     def list_checkpoints(self) -> list[CheckpointDTO]:
         return _scan_checkpoints()
@@ -1815,6 +1951,36 @@ class GameManager:
     def _clear_snapshot_history_locked(self) -> None:
         self._snapshot_history = []
         self._snapshot_history_index = None
+        self._spendee_visible_noble_slots_by_id = {}
+
+    def _current_spendee_visible_noble_slots_locked(self) -> dict[int, int] | None:
+        if not self._spendee_visible_noble_slots_by_id:
+            return None
+        return {
+            int(slot): int(noble_id)
+            for noble_id, slot in sorted(self._spendee_visible_noble_slots_by_id.items(), key=lambda item: item[1])
+        }
+
+    def _export_state_with_spendee_layout_locked(self) -> dict[str, Any]:
+        exported_state = self._ensure_env_locked().export_state()
+        if not self._spendee_visible_noble_slots_by_id:
+            return exported_state
+        next_slots = _advance_spendee_visible_noble_slots(
+            self._spendee_visible_noble_slots_by_id,
+            exported_state,
+        )
+        self._spendee_visible_noble_slots_by_id = next_slots
+        meta = exported_state.get("metadata")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta = dict(meta)
+        meta["source"] = str(meta.get("source", "spendee_bridge"))
+        meta["spendee_visible_noble_slots"] = {
+            str(slot): noble_id
+            for noble_id, slot in sorted(next_slots.items(), key=lambda item: item[1])
+        }
+        exported_state["metadata"] = meta
+        return exported_state
 
     def _infer_actions_between_snapshots_locked(self, start_state: dict[str, Any], end_state: dict[str, Any]) -> list[int] | None:
         hist_delta = _spendee_action_history_delta(start_state, end_state)
@@ -2026,6 +2192,7 @@ class GameManager:
                 actor_env.get_state(),
                 turn_index=max(0, int(start_saved.turn_index)),
                 player_seat=actor,
+                spendee_visible_noble_slots=_spendee_visible_noble_slots(start_state),
             )
 
             inferred_actions = self._infer_actions_between_snapshots_locked(start_state, end_state)
@@ -2193,6 +2360,19 @@ class GameManager:
         hidden_deck_card_ids_by_tier = env.hidden_deck_card_ids_by_tier()
         hidden_faceup_reveal_candidates = env.hidden_faceup_reveal_candidates()
         hidden_reserved_reveal_candidates = env.hidden_reserved_reveal_candidates()
+        current_saved_state = None
+        if (
+            self._snapshot_history_index is not None
+            and 0 <= int(self._snapshot_history_index) < len(self._snapshot_history)
+        ):
+            current_saved_state = self._snapshot_history[int(self._snapshot_history_index)].exported_state
+        spendee_visible_noble_slots = (
+            _spendee_visible_noble_slots(current_saved_state)
+            if current_saved_state
+            else None
+        )
+        if spendee_visible_noble_slots is None:
+            spendee_visible_noble_slots = self._current_spendee_visible_noble_slots_locked()
 
         winner = int(step.winner)
         status = "IN_PROGRESS"
@@ -2220,6 +2400,7 @@ class GameManager:
                         player_seat=config.player_seat,
                         pending_reveals=self._pending_reveals,
                         hidden_deck_card_ids_by_tier=hidden_deck_card_ids_by_tier,
+                        spendee_visible_noble_slots=spendee_visible_noble_slots,
                     ), _seat_str(step.current_player_id)),
                 )
                 for a in legal_actions
@@ -2254,6 +2435,7 @@ class GameManager:
                 player_seat=config.player_seat,
                 pending_reveals=self._pending_reveals,
                 hidden_deck_card_ids_by_tier=hidden_deck_card_ids_by_tier,
+                spendee_visible_noble_slots=spendee_visible_noble_slots,
             ),
             pending_reveals=[
                 PendingRevealDTO(
@@ -2318,6 +2500,9 @@ class GameManager:
             self._snapshot_history = list(normalized_snapshots)
             self._loaded_snapshot_history = list(normalized_snapshots)
             self._snapshot_history_index = int(saved.current_index)
+            self._spendee_visible_noble_slots_by_id = _spendee_visible_noble_slots_by_id(
+                self._snapshot_history[self._snapshot_history_index].exported_state
+            )
             self._apply_saved_snapshot_locked(
                 self._snapshot_history[self._snapshot_history_index],
                 game_id=saved.game_id,
@@ -2384,7 +2569,7 @@ class GameManager:
             self._snapshot_history.append(
                 SavedStateDTO(
                     turn_index=int(self._turn_index),
-                    exported_state=self._ensure_env_locked().export_state(),
+                    exported_state=self._export_state_with_spendee_layout_locked(),
                 )
             )
             self._snapshot_history_index = len(self._snapshot_history) - 1
@@ -2413,6 +2598,7 @@ class GameManager:
                 player_seat=actor,
                 pending_reveals=self._pending_reveals,
                 hidden_deck_card_ids_by_tier=env.hidden_deck_card_ids_by_tier(),
+                spendee_visible_noble_slots=self._current_spendee_visible_noble_slots_locked(),
             )
             step_after = env.step(int(event.action_idx))
             self._append_move_locked(actor, int(event.action_idx), step_after, board_before=board_before)
@@ -2531,6 +2717,7 @@ class GameManager:
                 player_seat=actor,
                 pending_reveals=self._pending_reveals,
                 hidden_deck_card_ids_by_tier=env.hidden_deck_card_ids_by_tier(),
+                spendee_visible_noble_slots=self._current_spendee_visible_noble_slots_locked(),
             )
             step_after = env.step(int(req.action_idx))
             self._append_move_locked(actor, int(req.action_idx), step_after, board_before=board_before)
