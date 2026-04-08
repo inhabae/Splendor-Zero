@@ -21,7 +21,7 @@
 
 body {
   margin: 0;
-  background: #0d0e10;
+  background: #111317;
   min-height: 100vh;
 }
 
@@ -688,6 +688,11 @@ button:disabled {
   position: relative;
   align-self: start;
   overflow: hidden;
+}
+
+.noble-slot-empty {
+  width: 112px;
+  height: 112px;
 }
 
 .noble-placeholder {

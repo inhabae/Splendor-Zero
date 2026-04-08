@@ -19,7 +19,6 @@ export function PlayerStrip({
   modelTopAction?: ActionVizDTO | null;
   onReservedCardClick?: (seat: Seat, slot: number) => void;
 }) {
-  const visibleReserved = player.reserved_public.filter((c) => c.source !== 'reserved_private').length;
   const mctsReservedSlot = player.is_to_move && mctsTopAction?.placement_hint.zone === 'reserved_card' ? mctsTopAction.placement_hint.slot : undefined;
   const modelReservedSlot = player.is_to_move && modelTopAction?.placement_hint.zone === 'reserved_card' ? modelTopAction.placement_hint.slot : undefined;
   return (
@@ -48,7 +47,7 @@ export function PlayerStrip({
       </div>
 
       <div className="player-strip-reserved">
-        <h4>Reserved ({visibleReserved}/3)</h4>
+        <h4>Reserved ({player.reserved_total}/3)</h4>
         <div className="reserved-row">
           {player.reserved_public.map((card, idx) => (
             <CardView

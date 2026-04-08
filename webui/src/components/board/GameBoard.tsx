@@ -86,6 +86,7 @@ export function GameBoard({
 }) {
   const mctsBankColors = actionBankColors(mctsTopAction);
   const modelBankColors = actionBankColors(modelTopAction);
+  const nobleBySlot = new Map((board.nobles ?? []).map((noble) => [noble.slot ?? -1, noble]));
   return (
     <section className="board-surface">
       <section className="board-main">
@@ -99,9 +100,19 @@ export function GameBoard({
             <div className="nobles-row">
               <div className="nobles-grid">
                 {board.nobles.length === 0 && <div className="empty-note">No nobles available</div>}
-                {board.nobles.map((noble, idx) => (
-                  <NobleView key={`noble-${idx}`} noble={noble} onClick={noble.slot != null ? () => onNobleClick?.(noble.slot as number) : undefined} />
-                ))}
+                {Array.from({ length: 3 }, (_, slot) => {
+                  const noble = nobleBySlot.get(slot);
+                  if (!noble) {
+                    return <div key={`noble-empty-${slot}`} className="noble-slot-empty" aria-hidden="true" />;
+                  }
+                  return (
+                    <NobleView
+                      key={`noble-${slot}`}
+                      noble={noble}
+                      onClick={noble.slot != null ? () => onNobleClick?.(noble.slot as number) : undefined}
+                    />
+                  );
+                })}
               </div>
             </div>
             <div className="bank-row bank-row-inline">

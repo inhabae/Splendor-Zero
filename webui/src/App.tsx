@@ -2322,13 +2322,8 @@ const displayedP0EvalRef = useRef<number | null>(null);
           is_placeholder: true,
         };
       }
-      return nobleBySlot.get(slot) ?? {
-        points: 0,
-        requirements: { white: 0, blue: 0, green: 0, red: 0, black: 0 },
-        slot,
-        is_placeholder: true,
-      };
-    }) as BoardStateDTO['nobles'];
+      return nobleBySlot.get(slot) ?? null;
+    }).filter((noble): noble is NonNullable<typeof noble> => noble != null) as BoardStateDTO['nobles'];
 
     return board;
   }, [snapshot, activeRevealKey, loadedPlayerNames]);
@@ -2680,7 +2675,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
   return (
     <main className={`app-shell ${isBoardView ? 'app-shell-board' : ''}`}>
       <header>
-        <h1>AhinLendor</h1>
+        <h1>AhinLab</h1>
         <div className="header-actions">
           {homeView !== 'HOME' && (
             <>
