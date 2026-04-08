@@ -185,7 +185,10 @@ function p0WinningEval(value: number | null | undefined, playerToMove: Seat | nu
 }
 
 function parsePlayerNamesFromFilename(filename: string): Record<Seat, string> | null {
-  const trimmed = filename.replace(/\.[^.]+$/, '').trim();
+  const trimmed = filename
+    .replace(/\.[^.]+$/, '')
+    .replace(/^Game\s+\S+\s*/i, '')
+    .trim();
   const parts = trimmed.split(/\s+vs\s+/i);
   if (parts.length !== 2) {
     return null;
