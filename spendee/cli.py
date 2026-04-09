@@ -40,6 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-interval-sec", type=float, default=0.5, help="Board polling interval")
     parser.add_argument("--stable-polls", type=int, default=2, help="Matching board snapshots required before acting")
     parser.add_argument("--artifact-dir", default="nn_artifacts/spendee_bridge", help="Directory for bridge logs/artifacts")
+    parser.add_argument(
+        "--mode",
+        choices=("play", "dry-run", "record-only"),
+        default=None,
+        help="Bridge mode: play submits engine moves, dry-run thinks without submitting, record-only just records the live Spendee game",
+    )
     parser.add_argument("--live", action="store_true", help="Actually submit actions to Spendee")
     parser.add_argument("--observe-only", action="store_true", help="Never think or act; just observe and log")
     parser.add_argument(
@@ -68,7 +74,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_bridge_mode(args: argparse.Namespace) -> tuple[bool, bool]:
+    selected_mode = str(args.mode) if args.mode is not None else None
+    if selected_mode == "play":
+        return False, False
+    if selected_mode == "dry-run":
+        return True, False
+    if selected_mode == "record-only":
+        return True, True
+    if bool(args.observe_only):
+        return True, True
+    if bool(args.live):
+        return False, False
+    return True, False
+
+
 async def _run_async(args: argparse.Namespace) -> None:
+    dry_run, observe_only = _resolve_bridge_mode(args)
     config = SpendeeBridgeConfig(
         start_url=str(args.start_url),
         user_data_dir=str(args.user_data_dir),
@@ -80,8 +102,8 @@ async def _run_async(args: argparse.Namespace) -> None:
         gpu_batching_enabled=bool(args.gpu_batching_enabled),
         poll_interval_sec=float(args.poll_interval_sec),
         stable_polls=int(args.stable_polls),
-        dry_run=not bool(args.live),
-        observe_only=bool(args.observe_only),
+        dry_run=dry_run,
+        observe_only=observe_only,
         auto_manage_rooms=bool(args.auto_manage_rooms),
         min_opponent_rating=int(args.min_opponent_rating),
         relative_rating_gap=(None if args.relative_rating_gap is None else int(args.relative_rating_gap)),

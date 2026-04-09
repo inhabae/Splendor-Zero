@@ -3,18 +3,22 @@ import {
   CatalogCardDTO,
   CatalogNobleDTO,
   BoardStateDTO,
+  CardDTO,
   CheckpointDTO,
+  ColorCountsDTO,
   EngineJobStatusDTO,
   EngineThinkResponse,
   GameSnapshotDTO,
   LiveSaveStatusDTO,
   MoveLogEntryDTO,
+  NobleDTO,
   PlayerMoveResponse,
   RevealCardResponse,
   SavedGameDTO,
   SavedGameWithDeepAnalysisDTO,
   SearchType,
   Seat,
+  TokenCountsDTO,
 } from './types';
 import { GameBoard } from './components/board/GameBoard';
 import { ActionLabel, actionTextLabel } from './components/ActionLabel';
@@ -2661,6 +2665,365 @@ const displayedP0EvalRef = useRef<number | null>(null);
 
   const isBoardView = (homeView === 'QUICK' || isSetupLikeView || homeView === 'LIVE') && snapshot;
 
+  async function onSaveBoardImage(): Promise<void> {
+    if (!displayBoard) {
+      setError('Board is unavailable to export.');
+      return;
+    }
+
+    try {
+      setError(null);
+
+      const escapeXml = (value: string): string => value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+      const rootStyle = getComputedStyle(document.documentElement);
+      const bodyStyle = getComputedStyle(document.body);
+      const pageBackground = bodyStyle.backgroundColor || 'rgb(17, 19, 23)';
+      const panelFill = rootStyle.getPropertyValue('--panel').trim() || '#17181b';
+      const boardFill = rootStyle.getPropertyValue('--board-surface-bg').trim() || '#2e343d';
+      const textLight = rootStyle.color || '#eef2fb';
+      const textMuted = '#9aa6bc';
+
+      const colorMap: Record<string, string> = {
+        white: '#f7f5e9',
+        blue: '#3e59ab',
+        green: '#20805c',
+        red: '#a64242',
+        black: '#52422f',
+        gold: '#d6b35f',
+      };
+      const reqOrder: Array<'white' | 'blue' | 'green' | 'red' | 'black'> = ['white', 'blue', 'green', 'red', 'black'];
+      const tokenOrder: Array<'gold' | 'white' | 'blue' | 'green' | 'red' | 'black'> = ['gold', 'white', 'blue', 'green', 'red', 'black'];
+      const width = 1880;
+      const height = 1040;
+
+      const renderToken = (x: number, y: number, color: keyof TokenCountsDTO, count: number): string => `
+        <g transform="translate(${x} ${y})">
+          <circle cx="30" cy="30" r="24" fill="${colorMap[color]}" stroke="#1e223080" stroke-width="3" />
+          <text x="30" y="38" text-anchor="middle" font-size="26" font-weight="800" fill="${color === 'white' || color === 'gold' ? '#1f2430' : '#ffffff'}">${count}</text>
+        </g>
+      `;
+      const renderCostRow = (cost: ColorCountsDTO, startX: number, y: number): string => reqOrder
+        .filter((color) => cost[color] > 0)
+        .map((color, idx) => `
+          <g transform="translate(${startX + idx * 34} ${y})">
+            <circle cx="14" cy="14" r="14" fill="${colorMap[color]}" stroke="#1e223080" stroke-width="2" />
+            <text x="14" y="19" text-anchor="middle" font-size="14" font-weight="800" fill="#ffffff">${cost[color]}</text>
+          </g>
+        `)
+        .join('');
+      const renderCard = (card: CardDTO, x: number, y: number, widthPx = 148, heightPx = 196): string => {
+        const stroke = card.is_placeholder ? '#a2abb9' : '#0f1320';
+        const fill = card.is_placeholder ? '#c9cfd8' : '#f3efe4';
+        const banner = card.is_placeholder ? '#d9dee6' : colorMap[card.bonus_color];
+        const label = card.is_placeholder ? '?' : `${card.points}`;
+        return `
+          <g transform="translate(${x} ${y})">
+            <rect x="0" y="0" width="${widthPx}" height="${heightPx}" rx="14" fill="${fill}" stroke="${stroke}" stroke-width="3" />
+            <rect x="0" y="0" width="${widthPx}" height="42" rx="14" fill="${banner}" />
+            <text x="18" y="30" font-size="28" font-weight="900" fill="${card.is_placeholder || card.bonus_color === 'white' ? '#1f2430' : '#ffffff'}">${label}</text>
+            ${card.is_placeholder ? '<text x="74" y="112" text-anchor="middle" font-size="72" font-weight="800" fill="#6b7380">?</text>' : renderCostRow(card.cost, 18, 150)}
+          </g>
+        `;
+      };
+      const renderNoble = (noble: NobleDTO | null, x: number, y: number): string => {
+        if (!noble) {
+          return `<rect x="${x}" y="${y}" width="132" height="100" rx="14" fill="#242a33" opacity="0.35" />`;
+        }
+        return `
+          <g transform="translate(${x} ${y})">
+            <rect x="0" y="0" width="132" height="100" rx="14" fill="#ece2c6" stroke="#5f4b2b" stroke-width="3" />
+            <text x="18" y="28" font-size="26" font-weight="900" fill="#2b2111">${noble.points}</text>
+            ${renderCostRow(noble.requirements, 14, 52)}
+          </g>
+        `;
+      };
+      const renderPlayer = (player: BoardStateDTO['players'][number], x: number, y: number): string => `
+        <g transform="translate(${x} ${y})">
+          <rect x="0" y="0" width="360" height="410" rx="18" fill="${panelFill}" stroke="rgba(255,255,255,0.08)" stroke-width="2" />
+          <text x="24" y="38" font-size="28" font-weight="800" fill="${textLight}">${escapeXml(player.display_name)}</text>
+          <text x="300" y="38" font-size="24" font-weight="800" fill="${textLight}">${player.points}★</text>
+          <text x="24" y="76" font-size="18" font-weight="700" fill="${textMuted}">Tokens</text>
+          ${tokenOrder.map((color, idx) => renderToken(18 + (idx % 3) * 106, 94 + Math.floor(idx / 3) * 76, color, player.tokens[color])).join('')}
+          <text x="24" y="264" font-size="18" font-weight="700" fill="${textMuted}">Bonuses</text>
+          ${reqOrder.map((color, idx) => renderToken(18 + idx * 66, 280, color, player.bonuses[color])).join('')}
+          <text x="24" y="388" font-size="18" font-weight="700" fill="${textMuted}">Reserved ${player.reserved_total}/3</text>
+          ${Array.from({ length: 3 }, (_, idx) => renderCard(
+            player.reserved_public.find((card) => card.slot === idx) ?? {
+              points: 0,
+              bonus_color: 'white',
+              cost: { white: 0, blue: 0, green: 0, red: 0, black: 0 },
+              source: 'reserved_public',
+              slot: idx,
+              is_placeholder: true,
+            },
+            18 + idx * 112,
+            404,
+            100,
+            132,
+          )).join('')}
+        </g>
+      `;
+
+      const nobleBySlot = new Map((displayBoard.nobles ?? []).map((noble) => [noble.slot ?? -1, noble]));
+      const svg = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+          <rect width="${width}" height="${height}" fill="${pageBackground}" />
+          ${renderPlayer(displayBoard.players[0], 40, 70)}
+          ${renderPlayer(displayBoard.players[1], 40, 560)}
+          <g transform="translate(440 60)">
+            <rect x="0" y="0" width="1380" height="920" rx="26" fill="${boardFill}" />
+            <g transform="translate(84 44)">
+              ${[0, 1, 2].map((slot) => renderNoble(nobleBySlot.get(slot) ?? null, slot * 170, 0)).join('')}
+            </g>
+            <g transform="translate(680 56)">
+              ${tokenOrder.map((color, idx) => renderToken(idx * 98, 0, color, displayBoard.bank[color])).join('')}
+            </g>
+            ${displayBoard.tiers.map((tier, rowIdx) => `
+              <g transform="translate(72 ${188 + rowIdx * 238})">
+                <rect x="0" y="0" width="118" height="196" rx="18" fill="#20252d" />
+                <text x="59" y="82" text-anchor="middle" font-size="52" font-weight="900" fill="${textLight}">${tier.tier}</text>
+                <text x="59" y="126" text-anchor="middle" font-size="26" font-weight="700" fill="${textMuted}">${tier.deck_count}</text>
+                ${Array.from({ length: 4 }, (_, slot) => renderCard(
+                  tier.cards.find((card) => card.slot === slot) ?? {
+                    points: 0,
+                    bonus_color: 'white',
+                    cost: { white: 0, blue: 0, green: 0, red: 0, black: 0 },
+                    source: 'faceup',
+                    tier: tier.tier,
+                    slot,
+                    is_placeholder: true,
+                  },
+                  156 + slot * 272,
+                  0,
+                )).join('')}
+              </g>
+            `).join('')}
+          </g>
+        </svg>
+      `;
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+      const downloadBlob = (blob: Blob, extension: 'png' | 'svg'): void => {
+        const downloadUrl = URL.createObjectURL(blob);
+        try {
+          const anchor = document.createElement('a');
+          anchor.href = downloadUrl;
+          anchor.download = `splendor-board-${timestamp}.${extension}`;
+          anchor.click();
+        } finally {
+          URL.revokeObjectURL(downloadUrl);
+        }
+      };
+
+      try {
+        const scale = Math.max(2, Math.ceil(window.devicePixelRatio || 1));
+        const canvas = document.createElement('canvas');
+        canvas.width = width * scale;
+        canvas.height = height * scale;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          throw new Error('Canvas export is unavailable.');
+        }
+        ctx.scale(scale, scale);
+
+        const drawRoundedRect = (
+          x: number,
+          y: number,
+          rectWidth: number,
+          rectHeight: number,
+          radius: number,
+          fill: string,
+          stroke?: string,
+          strokeWidth = 1,
+        ): void => {
+          const safeRadius = Math.min(radius, rectWidth / 2, rectHeight / 2);
+          ctx.beginPath();
+          ctx.moveTo(x + safeRadius, y);
+          ctx.lineTo(x + rectWidth - safeRadius, y);
+          ctx.quadraticCurveTo(x + rectWidth, y, x + rectWidth, y + safeRadius);
+          ctx.lineTo(x + rectWidth, y + rectHeight - safeRadius);
+          ctx.quadraticCurveTo(x + rectWidth, y + rectHeight, x + rectWidth - safeRadius, y + rectHeight);
+          ctx.lineTo(x + safeRadius, y + rectHeight);
+          ctx.quadraticCurveTo(x, y + rectHeight, x, y + rectHeight - safeRadius);
+          ctx.lineTo(x, y + safeRadius);
+          ctx.quadraticCurveTo(x, y, x + safeRadius, y);
+          ctx.closePath();
+          ctx.fillStyle = fill;
+          ctx.fill();
+          if (stroke) {
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = strokeWidth;
+            ctx.stroke();
+          }
+        };
+
+        const drawText = (
+          text: string,
+          x: number,
+          y: number,
+          font: string,
+          fill: string,
+          align: CanvasTextAlign = 'left',
+        ): void => {
+          ctx.font = font;
+          ctx.fillStyle = fill;
+          ctx.textAlign = align;
+          ctx.textBaseline = 'alphabetic';
+          ctx.fillText(text, x, y);
+        };
+
+        const drawToken = (x: number, y: number, color: keyof TokenCountsDTO, count: number): void => {
+          ctx.beginPath();
+          ctx.arc(x + 30, y + 30, 24, 0, Math.PI * 2);
+          ctx.fillStyle = colorMap[color];
+          ctx.fill();
+          ctx.strokeStyle = '#1e223080';
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          drawText(
+            String(count),
+            x + 30,
+            y + 39,
+            '800 26px Arial',
+            color === 'white' || color === 'gold' ? '#1f2430' : '#ffffff',
+            'center',
+          );
+        };
+
+        const drawCostRow = (cost: ColorCountsDTO, startX: number, y: number): void => {
+          reqOrder
+            .filter((color) => cost[color] > 0)
+            .forEach((color, idx) => {
+              const cx = startX + idx * 34 + 14;
+              const cy = y + 14;
+              ctx.beginPath();
+              ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+              ctx.fillStyle = colorMap[color];
+              ctx.fill();
+              ctx.strokeStyle = '#1e223080';
+              ctx.lineWidth = 2;
+              ctx.stroke();
+              drawText(String(cost[color]), cx, y + 19, '800 14px Arial', '#ffffff', 'center');
+            });
+        };
+
+        const drawCard = (card: CardDTO, x: number, y: number, widthPx = 148, heightPx = 196): void => {
+          const stroke = card.is_placeholder ? '#a2abb9' : '#0f1320';
+          const fill = card.is_placeholder ? '#c9cfd8' : '#f3efe4';
+          const banner = card.is_placeholder ? '#d9dee6' : colorMap[card.bonus_color];
+          const valueColor = card.is_placeholder || card.bonus_color === 'white' ? '#1f2430' : '#ffffff';
+          drawRoundedRect(x, y, widthPx, heightPx, 14, fill, stroke, 3);
+          drawRoundedRect(x, y, widthPx, 42, 14, banner);
+          ctx.fillStyle = fill;
+          ctx.fillRect(x, y + 14, widthPx, 28);
+          drawText(card.is_placeholder ? '?' : String(card.points), x + 18, y + 30, '900 28px Arial', valueColor);
+          if (card.is_placeholder) {
+            drawText('?', x + widthPx / 2, y + 122, '800 72px Arial', '#6b7380', 'center');
+          } else {
+            drawCostRow(card.cost, x + 18, y + 150);
+          }
+        };
+
+        const drawNoble = (noble: NobleDTO | null, x: number, y: number): void => {
+          if (!noble) {
+            ctx.save();
+            ctx.globalAlpha = 0.35;
+            drawRoundedRect(x, y, 132, 100, 14, '#242a33');
+            ctx.restore();
+            return;
+          }
+          drawRoundedRect(x, y, 132, 100, 14, '#ece2c6', '#5f4b2b', 3);
+          drawText(String(noble.points), x + 18, y + 28, '900 26px Arial', '#2b2111');
+          drawCostRow(noble.requirements, x + 14, y + 52);
+        };
+
+        const drawPlayer = (player: BoardStateDTO['players'][number], x: number, y: number): void => {
+          drawRoundedRect(x, y, 360, 560, 18, panelFill, 'rgba(255,255,255,0.08)', 2);
+          drawText(player.display_name, x + 24, y + 38, '800 28px Arial', textLight);
+          drawText(`${player.points}*`, x + 320, y + 38, '800 24px Arial', textLight, 'right');
+          drawText('Tokens', x + 24, y + 76, '700 18px Arial', textMuted);
+          tokenOrder.forEach((color, idx) => {
+            drawToken(x + 18 + (idx % 3) * 106, y + 94 + Math.floor(idx / 3) * 76, color, player.tokens[color]);
+          });
+          drawText('Bonuses', x + 24, y + 264, '700 18px Arial', textMuted);
+          reqOrder.forEach((color, idx) => {
+            drawToken(x + 18 + idx * 66, y + 280, color, player.bonuses[color]);
+          });
+          drawText(`Reserved ${player.reserved_total}/3`, x + 24, y + 388, '700 18px Arial', textMuted);
+          Array.from({ length: 3 }, (_, idx) => {
+            const fallbackCard: CardDTO = {
+              points: 0,
+              bonus_color: 'white',
+              cost: { white: 0, blue: 0, green: 0, red: 0, black: 0 },
+              source: 'reserved_public',
+              slot: idx,
+              is_placeholder: true,
+            };
+            const card = player.reserved_public.find((item) => item.slot === idx) ?? fallbackCard;
+            drawCard(card, x + 18 + idx * 112, y + 404, 100, 132);
+            return null;
+          });
+        };
+
+        ctx.fillStyle = pageBackground;
+        ctx.fillRect(0, 0, width, height);
+        drawPlayer(displayBoard.players[0], 40, 70);
+        drawPlayer(displayBoard.players[1], 40, 560);
+        drawRoundedRect(440, 60, 1380, 920, 26, boardFill);
+
+        [0, 1, 2].forEach((slot) => {
+          drawNoble(nobleBySlot.get(slot) ?? null, 524 + slot * 170, 104);
+        });
+        tokenOrder.forEach((color, idx) => {
+          drawToken(1120 + idx * 98, 116, color, displayBoard.bank[color]);
+        });
+        displayBoard.tiers.forEach((tier, rowIdx) => {
+          const rowX = 512;
+          const rowY = 248 + rowIdx * 238;
+          drawRoundedRect(rowX, rowY, 118, 196, 18, '#20252d');
+          drawText(String(tier.tier), rowX + 59, rowY + 82, '900 52px Arial', textLight, 'center');
+          drawText(String(tier.deck_count), rowX + 59, rowY + 126, '700 26px Arial', textMuted, 'center');
+          Array.from({ length: 4 }, (_, slot) => {
+            const fallbackCard: CardDTO = {
+              points: 0,
+              bonus_color: 'white',
+              cost: { white: 0, blue: 0, green: 0, red: 0, black: 0 },
+              source: 'faceup',
+              tier: tier.tier,
+              slot,
+              is_placeholder: true,
+            };
+            const card = tier.cards.find((item) => item.slot === slot) ?? fallbackCard;
+            drawCard(card, rowX + 156 + slot * 272, rowY, 148, 196);
+            return null;
+          });
+        });
+
+        const pngBlob = await new Promise<Blob>((resolve, reject) => {
+          canvas.toBlob((blob) => {
+            if (blob) {
+              resolve(blob);
+            } else {
+              reject(new Error('Failed to encode board image.'));
+            }
+          }, 'image/png');
+        });
+        downloadBlob(pngBlob, 'png');
+      } catch {
+        const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+        downloadBlob(svgBlob, 'svg');
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
   function renderMoveContent(move: MoveLogDisplayEntry): JSX.Element {
     const parts = move.label.split(' + ').filter((part) => part.length > 0);
     const extras = parts.slice(1);
@@ -2999,6 +3362,18 @@ const displayedP0EvalRef = useRef<number | null>(null);
                           />
                           <span>Hide all except board</span>
                         </label>
+                      </div>
+                      <div className="analysis-settings-section">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void onSaveBoardImage();
+                            setShowAnalysisSettings(false);
+                          }}
+                          disabled={!displayBoard}
+                        >
+                          Save board image
+                        </button>
                       </div>
                     </div>
                   )}

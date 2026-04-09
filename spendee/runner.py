@@ -83,6 +83,14 @@ class SpendeeBridgeConfig:
     selectors: SpendeeSelectorConfig = field(default_factory=SpendeeSelectorConfig)
     artifact_dir: str = "nn_artifacts/spendee_bridge"
 
+    @property
+    def bridge_mode(self) -> Literal["play", "dry_run", "record_only"]:
+        if self.observe_only:
+            return "record_only"
+        if self.dry_run:
+            return "dry_run"
+        return "play"
+
 
 def is_actionable_turn(observed: ObservedBoardState, player_seat: str | None) -> bool:
     if player_seat is None or observed.current_turn_seat != player_seat:
@@ -202,6 +210,7 @@ class SpendeeBridgeRunner:
             "reason": reason,
             "player_seat": self._player_seat,
             "seat_verified": self._seat_verified,
+            "bridge_mode": self.config.bridge_mode,
         }
         if observed is not None:
             payload.update(
@@ -222,6 +231,7 @@ class SpendeeBridgeRunner:
             "player_seat": self._player_seat,
             "seat_verified": self._seat_verified,
             "last_action_idx": self._last_action_idx,
+            "bridge_mode": self.config.bridge_mode,
         }
         if observed is not None:
             payload.update(

@@ -2198,13 +2198,16 @@ class GameManager:
             inferred_actions = self._infer_actions_between_snapshots_locked(start_state, end_state)
             if not inferred_actions:
                 # Bridge logs can contain intermediate observation snapshots that
-                # do not represent a new action (same turn index and same action
-                # history length). When inference fails on those, skip them.
+                # do not represent a new action. After a buy/reserve, Spendee can
+                # publish a follow-up snapshot that only reveals the replacement
+                # face-up card and hands the turn to the opponent, while the
+                # action history length remains unchanged. When inference fails on
+                # those observation-only snapshots, skip them instead of emitting
+                # a duplicate "unknown" move.
                 start_hist_len = _spendee_action_history_len(start_state)
                 end_hist_len = _spendee_action_history_len(end_state)
                 if (
-                    int(end_saved.turn_index) == int(start_saved.turn_index)
-                    and start_hist_len is not None
+                    start_hist_len is not None
                     and end_hist_len is not None
                     and int(end_hist_len) == int(start_hist_len)
                 ):
