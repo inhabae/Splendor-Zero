@@ -191,7 +191,7 @@ function p0WinningEval(value: number | null | undefined, playerToMove: Seat | nu
 function parsePlayerNamesFromFilename(filename: string): Record<Seat, string> | null {
   const trimmed = filename
     .replace(/\.[^.]+$/, '')
-    .replace(/^Game\s+\S+\s*/i, '')
+    .replace(/^(?:Game|Deep Analysis)\s+\S+\s*/i, '')
     .trim();
   const parts = trimmed.split(/\s+vs\s+/i);
   if (parts.length !== 2) {
@@ -2265,11 +2265,38 @@ const displayedP0EvalRef = useRef<number | null>(null);
     return details.find((detail) => detail.action_idx === currentDeepAnalysisEntry.playedActionIdx) ?? null;
   }, [currentDeepAnalysisEntry, preferredAnalysisResult]);
   const allAnalysisMoves = useMemo(() => {
-    const details = snapshot?.legal_action_details ?? [];
-    return details
+    const legalDetails = snapshot?.legal_action_details ?? [];
+    if (!showBoardAnalysis) {
+      return legalDetails
+        .slice()
+        .sort((a, b) => a.action_idx - b.action_idx);
+    }
+
+    const rankedDetails = preferredAnalysisResult?.action_details ?? [];
+    const scoreByAction = new Map<number, number>();
+    rankedDetails.forEach((detail) => {
+      if (!detail.masked) {
+        scoreByAction.set(detail.action_idx, detail.policy_prob);
+      }
+    });
+
+    return legalDetails
       .slice()
-      .sort((a, b) => a.action_idx - b.action_idx);
-  }, [snapshot]);
+      .sort((a, b) => {
+        const scoreA = scoreByAction.get(a.action_idx);
+        const scoreB = scoreByAction.get(b.action_idx);
+        if (scoreA != null && scoreB != null && scoreA !== scoreB) {
+          return scoreB - scoreA;
+        }
+        if (scoreA != null) {
+          return -1;
+        }
+        if (scoreB != null) {
+          return 1;
+        }
+        return a.action_idx - b.action_idx;
+      });
+  }, [preferredAnalysisResult, showBoardAnalysis, snapshot]);
   const displayBoard = useMemo(() => {
     if (!snapshot?.board_state) {
       return null;
@@ -3380,6 +3407,18 @@ const displayedP0EvalRef = useRef<number | null>(null);
                 </div>
                 </div>
               )}
+              {analysisPanelTab === 'MOVES' && (
+                <div className="analysis-controls-row">
+                  <label className="analysis-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showBoardAnalysis}
+                      onChange={(event) => setShowBoardAnalysis(event.target.checked)}
+                    />
+                    <span>Analysis</span>
+                  </label>
+                </div>
+              )}
               {uiStatus === 'WAITING_REVEAL' && <p>Waiting for board update before the next move.</p>}
               {jobStatus?.error && <p className="error">Engine error: {jobStatus.error}</p>}
               {homeView === 'LIVE' && (
@@ -3478,25 +3517,44 @@ const displayedP0EvalRef = useRef<number | null>(null);
                     {allAnalysisMoves.length === 0 ? (
                       <div className="analysis-line placeholder analysis-panel-empty" role="listitem">Waiting for search...</div>
                     ) : (
-                      allAnalysisMoves.map((detail) => (
-                        <button
-                          key={`analysis-move-${detail.action_idx}`}
-                          type="button"
-                          className="analysis-line analysis-line-move-only analysis-line-button"
-                          role="listitem"
-                          onClick={() => {
-                            void onSelectAnalysisAction(detail.action_idx);
-                          }}
-                        >
-                          <div className="analysis-line-name">
-                            <ActionLabel
-                              actionIdx={detail.action_idx}
-                              display={detail.display ?? null}
-                              board={displayBoard ?? snapshot?.board_state ?? null}
-                            />
-                          </div>
-                        </button>
-                      ))
+                      allAnalysisMoves.map((detail) => {
+                        const analysisDetail = preferredAnalysisResult?.action_details?.find(
+                          (candidate) => !candidate.masked && candidate.action_idx === detail.action_idx,
+                        ) ?? null;
+                        const absoluteEval = showBoardAnalysis
+                          ? p0WinningEval(analysisDetail?.q_value, snapshot?.player_to_move ?? null)
+                          : null;
+                        const evalClass = topMoveEvalClass(absoluteEval);
+                        return (
+                          <button
+                            key={`analysis-move-${detail.action_idx}`}
+                            type="button"
+                            className={`analysis-line analysis-line-button ${showBoardAnalysis ? '' : 'analysis-line-move-only'}`}
+                            role="listitem"
+                            onClick={() => {
+                              void onSelectAnalysisAction(detail.action_idx);
+                            }}
+                          >
+                            {showBoardAnalysis && (
+                              <div className="analysis-line-stats">
+                                <span className={`analysis-line-q ${evalClass}`}>
+                                  {analysisDetail ? formatTopMoveEval(absoluteEval) : '--'}
+                                </span>
+                                <span className="analysis-line-visit">
+                                  {analysisDetail ? `${(analysisDetail.policy_prob * 100).toFixed(1)}%` : '--'}
+                                </span>
+                              </div>
+                            )}
+                            <div className="analysis-line-name">
+                              <ActionLabel
+                                actionIdx={detail.action_idx}
+                                display={detail.display ?? null}
+                                board={displayBoard ?? snapshot?.board_state ?? null}
+                              />
+                            </div>
+                          </button>
+                        );
+                      })
                     )}
                   </div>
                 )}
