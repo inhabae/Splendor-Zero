@@ -2543,9 +2543,14 @@ class GameManager:
         action_idx = int(action_idx)
         label = _describe_action(action_idx)
         result_turn_index = self._turn_index + 1
+        can_extend_snapshot_history = (
+            self._snapshot_history_index is not None
+            and self._snapshot_history
+            and int(self._snapshot_history_index) == len(self._snapshot_history) - 1
+        )
         result_snapshot_index = (
             len(self._snapshot_history)
-            if self._snapshot_history_index is not None and self._snapshot_history
+            if can_extend_snapshot_history
             else result_turn_index
         )
         self._move_log.append(
@@ -2567,20 +2572,18 @@ class GameManager:
 
     def _record_event_locked(self, event: GameEvent) -> None:
         if self._snapshot_history_index is not None and self._snapshot_history:
-            # In analysis mode we need loaded/mainline snapshot indices to stay
-            # stable so deviation branches can coexist with future mainline
-            # positions. Appending branch snapshots at the end preserves the
-            # original indices instead of truncating and reusing them.
-            self._snapshot_history.append(
-                SavedStateDTO(
-                    turn_index=int(self._turn_index),
-                    exported_state=self._export_state_with_spendee_layout_locked(),
+            can_extend_snapshot_history = int(self._snapshot_history_index) == len(self._snapshot_history) - 1
+            if can_extend_snapshot_history:
+                self._snapshot_history.append(
+                    SavedStateDTO(
+                        turn_index=int(self._turn_index),
+                        exported_state=self._export_state_with_spendee_layout_locked(),
+                    )
                 )
-            )
-            self._snapshot_history_index = len(self._snapshot_history) - 1
-            self._event_log = []
-            self._redo_log = []
-            return
+                self._snapshot_history_index = len(self._snapshot_history) - 1
+                self._event_log = []
+                self._redo_log = []
+                return
         self._clear_snapshot_history_locked()
         if event.kind in ("reveal_card", "reveal_reserved_card", "reveal_noble") and not self._move_log:
             self._setup_event_log.append(event)
