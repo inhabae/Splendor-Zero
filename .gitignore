@@ -45,3 +45,4 @@ tests/*
 nn_artifacts/
 
 .tmp*
+.venv*

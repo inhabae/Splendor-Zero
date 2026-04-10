@@ -2951,9 +2951,6 @@ class GameManager:
                             cur_job.search_type = search_type if search_type in ("mcts", "ismcts") else "mcts"
                             cur_job.model_action_details = model_action_details
 
-                        if not continuous_until_cancel:
-                            break
-
                     with self._lock:
                         cur_job = self._jobs.get(job.job_id)
                         if cur_job is None:
