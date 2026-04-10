@@ -2608,7 +2608,6 @@ class GameManager:
         if event.kind == "reveal_card":
             if event.tier is None or event.slot is None or event.card_id is None:
                 raise RuntimeError("Corrupt reveal_card event")
-            allow_setup_edit = self._has_initial_setup_pending_locked()
             pending_index = next(
                 (
                     idx
@@ -2617,10 +2616,7 @@ class GameManager:
                 ),
                 None,
             )
-            if allow_setup_edit or pending_index is None:
-                env.set_faceup_card_any(event.tier - 1, event.slot, event.card_id)
-            else:
-                env.set_faceup_card(event.tier - 1, event.slot, event.card_id)
+            env.set_faceup_card(event.tier - 1, event.slot, event.card_id)
             if pending_index is not None:
                 self._pending_reveals.pop(pending_index)
             return
@@ -2836,7 +2832,7 @@ class GameManager:
                             device=search_device,
                             config=MCTSConfig(
                                 num_simulations=search_budget,
-                                c_puct=1.0,
+                                c_puct=1.25,
                                 temperature_moves=0,
                                 temperature=0.0,
                                 root_dirichlet_noise=False,
@@ -2854,7 +2850,7 @@ class GameManager:
                             device=search_device,
                             config=ISMCTSConfig(
                                 num_simulations=search_budget,
-                                c_puct=1.0,
+                                c_puct=1.25,
                                 eval_batch_size=1,
                                 forced_root_action_idx=forced_root_action_idx,
                             ),
@@ -3022,13 +3018,7 @@ class GameManager:
                 ),
                 None,
             )
-            allow_setup_edit = self._has_initial_setup_pending_locked()
-            if pending_index is None and not allow_setup_edit:
-                env.set_faceup_card_any(req.tier - 1, req.slot, req.card_id)
-            elif allow_setup_edit:
-                env.set_faceup_card_any(req.tier - 1, req.slot, req.card_id)
-            else:
-                env.set_faceup_card(req.tier - 1, req.slot, req.card_id)
+            env.set_faceup_card(req.tier - 1, req.slot, req.card_id)
 
             if pending_index is not None:
                 self._pending_reveals.pop(pending_index)

@@ -1980,6 +1980,44 @@ button:disabled {
   display: contents;
 }
 
+.move-log-deviation-row {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.move-log-deviation-bracket {
+  color: var(--text-muted);
+  font-size: 0.8em;
+  padding: 0 2px;
+  user-select: none;
+}
+
+.move-log-deviation-moves {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.move-log-deviation-num {
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+
+.move-log-edit-label {
+  font-style: italic;
+  color: var(--text-muted);
+  font-size: 0.88em;
+}
+
+.move-log-edit-icon {
+  opacity: 0.7;
+}
+
 .move-log-number {
   font-variant-numeric: tabular-nums;
   color: #96a0b4;
@@ -2115,9 +2153,34 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.move-log-deviation-btn {
+  border: none;
+  background: #1b1f25;
+  color: #eef2fb;
+  border-radius: 7px;
+  padding: 0.26rem 0.4rem;
+  text-align: left;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: auto;
+  min-width: 0;
+  opacity: 0.7;
+  font-size: 0.85em;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
 .move-log-variation-btn:hover {
   color: #7a5e33;
   text-decoration: none;
+}
+
+.move-log-deviation-btn:hover {
+  color: #eef2fb;
+  text-decoration: none;
+  opacity: 1;
 }
 
 .move-log-variation-btn.active {
@@ -2128,7 +2191,20 @@ button:disabled {
   opacity: 1;
 }
 
+.move-log-deviation-btn.active {
+  background: #2c333b;
+  color: #d6dbe4;
+  font-weight: 800;
+  cursor: default;
+  opacity: 1;
+}
+
 .move-log-variation-btn.active:disabled {
+  opacity: 1;
+  color: #d6dbe4;
+}
+
+.move-log-deviation-btn.active:disabled {
   opacity: 1;
   color: #d6dbe4;
 }

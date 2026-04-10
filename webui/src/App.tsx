@@ -1,5 +1,6 @@
-import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActionDisplayDTO,
   CatalogCardDTO,
   CatalogNobleDTO,
   BoardStateDTO,
@@ -68,7 +69,9 @@ interface VariationMove {
   kind: 'move' | 'edit_faceup' | 'edit_reserved' | 'edit_noble';
   actor: Seat;
   actionIdx: number;
+  replayActionIdxList?: number[];
   label: string;
+  display?: ActionDisplayDTO | null;
   fullMoveNumber: number;
   targetSnapshotIndex: number;
   targetTurnIndex: number;
@@ -85,6 +88,10 @@ interface VariationBranch {
   anchorSnapshotIndex: number;
   moves: VariationMove[];
 }
+
+type MoveToken =
+  | { kind: 'mainline_row'; row: MoveLogRow; rowIdx: number }
+  | { kind: 'deviation_block'; branch: VariationBranch };
 
 type DeepAnalysisCategory = 'Best' | 'Good' | 'Mistake' | 'Blunder' | 'Unknown';
 
@@ -391,6 +398,35 @@ const displayedP0EvalRef = useRef<number | null>(null);
     }
     return out;
   }, [variationBranches]);
+  const moveLogTokens = useMemo<MoveToken[]>(() => {
+    const tokens: MoveToken[] = [];
+    for (let rowIdx = 0; rowIdx < moveLogRows.length; rowIdx++) {
+      const row = moveLogRows[rowIdx];
+      tokens.push({ kind: 'mainline_row', row, rowIdx });
+      // Emit deviation blocks anchored on p0's snapshot, then p1's snapshot,
+      // so each branch appears immediately after the half-move it diverges from.
+      const p0Snap = row.p0?.result_snapshot_index ?? null;
+      const p1Snap = row.p1?.result_snapshot_index ?? null;
+      const anchors: number[] = [];
+      if (p0Snap != null) anchors.push(p0Snap);
+      if (p1Snap != null && p1Snap !== p0Snap) anchors.push(p1Snap);
+      for (const snap of anchors) {
+        for (const branch of (variationBranchByAnchor.get(snap) ?? [])) {
+          tokens.push({ kind: 'deviation_block', branch });
+        }
+      }
+    }
+    // Pre-game deviations (anchor = 0) before the first row.
+    const preGame = variationBranchByAnchor.get(0) ?? [];
+    if (preGame.length > 0) {
+      const preTokens: MoveToken[] = [];
+      for (const branch of preGame) {
+        preTokens.push({ kind: 'deviation_block', branch });
+      }
+      tokens.unshift(...preTokens);
+    }
+    return tokens;
+  }, [moveLogRows, variationBranchByAnchor]);
   const currentSnapshotIndex = useMemo<number>(() => {
     if (!snapshot) {
       return 0;
@@ -487,19 +523,22 @@ const displayedP0EvalRef = useRef<number | null>(null);
         }
       }
     }
-    // Branched positions do not always map to a mainline snapshot index.
-    if (snapshot.current_snapshot_index == null) {
-      const activeBranchId = activeVariationBranchIdRef.current;
-      if (activeBranchId != null) {
-        const activeBranch = variationBranches.find((branch) => branch.id === activeBranchId) ?? null;
-        if (activeBranch) {
-          for (let idx = activeBranch.moves.length - 1; idx >= 0; idx -= 1) {
-            if (activeBranch.moves[idx].targetTurnIndex === snapshot.turn_index) {
-              return { branchId: activeBranch.id, moveIndex: idx };
-            }
+    // Branched positions do not always map to a mainline snapshot index,
+    // or the stored targetSnapshotIndex may differ from the replayed snapshot index.
+    // Always fall back to matching by turn index on the active branch first,
+    // then try all branches.
+    const activeBranchId = activeVariationBranchIdRef.current;
+    if (activeBranchId != null) {
+      const activeBranch = variationBranches.find((branch) => branch.id === activeBranchId) ?? null;
+      if (activeBranch) {
+        for (let idx = activeBranch.moves.length - 1; idx >= 0; idx -= 1) {
+          if (activeBranch.moves[idx].targetTurnIndex === snapshot.turn_index) {
+            return { branchId: activeBranch.id, moveIndex: idx };
           }
         }
       }
+    }
+    if (snapshot.current_snapshot_index == null) {
       for (const branch of variationBranches) {
         for (let idx = branch.moves.length - 1; idx >= 0; idx -= 1) {
           const move = branch.moves[idx];
@@ -673,6 +712,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     deepSearchOverride: Record<string, DeepAnalysisSearchResult> | null = null,
     suppressAutoAnalyze = false,
     preserveActiveSearch = false,
+    preserveLoadedMoveLog = false,
   ): Promise<void> {
     if (!preserveActiveSearch) {
       clearPolling();
@@ -698,7 +738,12 @@ const displayedP0EvalRef = useRef<number | null>(null);
     if (nextSnapshot.config?.analysis_mode) {
       setLoadedMoveLog((prev) => {
         const incoming = nextSnapshot.move_log ?? [];
-        const preserveLoadedMainline = activeVariationBranchIdRef.current != null && nextSnapshot.current_snapshot_index == null;
+        // Never overwrite a loaded mainline with a snapshot from a deviation or mainline
+        // jump that the backend returned with a shorter/diverged move_log.
+        if (preserveLoadedMoveLog && prev && prev.length > 0) {
+          return prev;
+        }
+        const preserveLoadedMainline = activeVariationBranchIdRef.current != null;
         if (preserveLoadedMainline && prev && prev.length > 0) {
           return prev;
         }
@@ -1212,7 +1257,9 @@ const displayedP0EvalRef = useRef<number | null>(null);
 
       if (beforeSnapshot) {
         const actor = beforeSnapshot.player_to_move;
-        const label = beforeSnapshot.legal_action_details.find((item) => item.action_idx === actionIdx)?.label ?? `Action ${actionIdx}`;
+        const actionInfo = beforeSnapshot.legal_action_details.find((item) => item.action_idx === actionIdx) ?? null;
+        const label = actionInfo?.label ?? `Action ${actionIdx}`;
+        const display = actionInfo?.display ?? null;
         const variationCtx = deriveVariationContext(beforeSnapshot, beforeSnapshotIndex, actor);
         const expectedMainlineMove = variationCtx?.expectedMainlineMove ?? null;
         const isOnMainlineSnapshot = variationCtx?.isOnMainlineSnapshot ?? false;
@@ -1232,7 +1279,9 @@ const displayedP0EvalRef = useRef<number | null>(null);
                   kind: 'move',
                   actor,
                   actionIdx,
+                  replayActionIdxList: [actionIdx],
                   label,
+                  display,
                   fullMoveNumber: baseFullMoveNumber,
                   targetSnapshotIndex: result.snapshot.current_snapshot_index ?? -1,
                   targetTurnIndex: result.snapshot.turn_index,
@@ -1247,33 +1296,15 @@ const displayedP0EvalRef = useRef<number | null>(null);
             if (branch.id !== activeId) {
               return branch;
             }
-            const shouldMergeContinuation =
-              isContinuationAction(actionIdx)
-              && branch.moves.length > 0
-              && branch.moves[branch.moves.length - 1].kind === 'move'
-              && branch.moves[branch.moves.length - 1].actor === actor;
-            if (shouldMergeContinuation) {
-              const updatedMoves = [...branch.moves];
-              const last = updatedMoves[updatedMoves.length - 1];
-              updatedMoves[updatedMoves.length - 1] = {
-                ...last,
-                label: `${last.label} + ${label}`,
-                targetSnapshotIndex: result.snapshot.current_snapshot_index ?? -1,
-                targetTurnIndex: result.snapshot.turn_index,
-                jumpBySnapshot: result.snapshot.current_snapshot_index != null,
-              };
-              return {
-                ...branch,
-                moves: updatedMoves,
-              };
-            }
             return {
               ...branch,
               moves: [...branch.moves, {
                 kind: 'move',
                 actor,
                 actionIdx,
+                replayActionIdxList: [actionIdx],
                 label,
+                display,
                 fullMoveNumber: (() => {
                   const last = branch.moves[branch.moves.length - 1];
                   if (!last) return baseFullMoveNumber;
@@ -1322,7 +1353,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     const actor = snapshot.player_to_move;
     const variationCtx = deriveVariationContext(snapshot, currentSnapshotIndex, actor);
     const mainlineMove = variationCtx?.expectedMainlineMove ?? null;
-    if (mainlineMove && mainlineMove.action_idx === actionIdx) {
+    if (mainlineMove && mainlineMove.action_idx === actionIdx && activeVariationBranchIdRef.current == null) {
       await onJumpToSnapshot(mainlineMove.result_snapshot_index, false, !autoAnalyzeOnNavigation, false);
       return;
     }
@@ -1448,6 +1479,10 @@ const displayedP0EvalRef = useRef<number | null>(null);
     if (!keepActiveVariationBranch) {
       activeVariationBranchIdRef.current = null;
     }
+    // Preserve the loaded mainline whenever we jump to a historical snapshot,
+    // because the server's move_log on the returned snapshot reflects only
+    // moves up to that position and would overwrite the full recorded mainline.
+    const shouldPreserveLog = loadedHistoricalMainlineLengthRef.current > 0;
     try {
       const shouldSuppressAutoAnalyze = suppressAutoAnalyze || isLoadedPostAnalysisGame;
       const nextSnapshot = await fetchJSON<GameSnapshotDTO>('/api/game/jump-to-snapshot', {
@@ -1462,6 +1497,8 @@ const displayedP0EvalRef = useRef<number | null>(null);
         !shouldSuppressAutoAnalyze && shouldAutoAnalyze(nextSnapshot),
         null,
         shouldSuppressAutoAnalyze,
+        false,
+        shouldPreserveLog,
       );
     } catch {
       if (!fallbackToTurn) {
@@ -1584,8 +1621,14 @@ const displayedP0EvalRef = useRef<number | null>(null);
       return;
     }
 
+    // Stepping the mainline always exits any active deviation.
+    activeVariationBranchIdRef.current = null;
+
     const useTurnNavigation = snapshot.current_snapshot_index == null && !isLoadedMainlineExtensionState;
     const navigationTargets = useTurnNavigation ? mainlineMoveTurnIndices : mainlineMoveSnapshotIndices;
+    // When coming from a deviation, currentSnapshotIndex may not be in
+    // mainlineMoveSnapshotIndices. Find the latest mainline position that is
+    // <= the deviation's anchor so the step lands on the correct next mainline move.
     const activeSnapshotIndex = useTurnNavigation ? snapshot.turn_index : currentSnapshotIndex;
     let baseIdx = 0;
     for (let i = 0; i < navigationTargets.length; i += 1) {
@@ -1641,11 +1684,16 @@ const displayedP0EvalRef = useRef<number | null>(null);
       for (let idx = 0; idx <= moveIndex; idx += 1) {
         const item = branch.moves[idx];
         if (item.kind === 'move') {
-          const result = await fetchJSON<PlayerMoveResponse>('/api/game/player-move', {
-            method: 'POST',
-            body: JSON.stringify({ action_idx: item.actionIdx }),
-          });
-          nextSnapshot = result.snapshot;
+          const actionsToReplay = item.replayActionIdxList && item.replayActionIdxList.length > 0
+            ? item.replayActionIdxList
+            : [item.actionIdx];
+          for (const replayActionIdx of actionsToReplay) {
+            const result = await fetchJSON<PlayerMoveResponse>('/api/game/player-move', {
+              method: 'POST',
+              body: JSON.stringify({ action_idx: replayActionIdx }),
+            });
+            nextSnapshot = result.snapshot;
+          }
           continue;
         }
         if (item.kind === 'edit_faceup') {
@@ -1676,7 +1724,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
       if (shouldSuppressAutoAnalyze) {
         lastAutoAnalyzeKeyRef.current = autoAnalyzeKey(nextSnapshot);
       }
-      await handleSnapshotUpdate(nextSnapshot, false, null, shouldSuppressAutoAnalyze);
+      await handleSnapshotUpdate(nextSnapshot, false, null, shouldSuppressAutoAnalyze, false, true);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -1686,6 +1734,29 @@ const displayedP0EvalRef = useRef<number | null>(null);
     const moveNumber = Math.max(1, move.fullMoveNumber);
     const prefix = move.actor === 'P0' ? `${moveNumber}.` : `${moveNumber}...`;
     return `${prefix} ${actionTextLabel(move.actionIdx)}`;
+  }
+
+  function renderVariationMove(move: VariationMove): JSX.Element {
+    if (move.kind !== 'move') {
+      return (
+        <span className="action-label move-log-edit-label">
+          <span className="move-log-edit-icon">✎</span>
+          {' '}{move.label}
+        </span>
+      );
+    }
+    const moveNumber = Math.max(1, move.fullMoveNumber);
+    const prefix = move.actor === 'P0' ? `${moveNumber}.` : `${moveNumber}...`;
+    return (
+      <span className="action-label">
+        <span className="move-log-deviation-num">{prefix}{' '}</span>
+        <ActionLabel
+          actionIdx={move.actionIdx}
+          display={move.display ?? null}
+          board={snapshot?.board_state ?? null}
+        />
+      </span>
+    );
   }
 
   function appendVariationEditNode(
@@ -2438,18 +2509,6 @@ const displayedP0EvalRef = useRef<number | null>(null);
           ? (snapshot.hidden_faceup_reveal_candidates[pendingKey] ?? [])
           : (snapshot.hidden_deck_card_ids_by_tier[activeReveal.tier] ?? []),
       );
-      if (!hasPendingFaceupReveal) {
-        const tierCards = displayBoard?.tiers.find((tier) => tier.tier === activeReveal.tier)?.cards ?? [];
-        for (const card of tierCards) {
-          if (card.is_placeholder) {
-            continue;
-          }
-          const id = findCatalogCardId(card);
-          if (id != null) {
-            ids.add(id);
-          }
-        }
-      }
       return ids;
     }
     if (activeReveal.zone === 'reserved_card' && activeReveal.actor) {
@@ -2502,7 +2561,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
         return;
       }
       const activeElements = Array.from(
-        container.querySelectorAll<HTMLElement>('.move-log-btn.active, .move-log-variation-btn.active'),
+        container.querySelectorAll<HTMLElement>('.move-log-btn.active, .move-log-deviation-btn.active'),
       );
       const target = activeElements.length > 0 ? activeElements[activeElements.length - 1] : null;
       if (!target) {
@@ -3571,65 +3630,24 @@ const displayedP0EvalRef = useRef<number | null>(null);
                 <p className="empty-note">No moves yet.</p>
               ) : (
                 <div className="move-log-grid" role="list" ref={moveLogGridRef}>
-                  {variationBranchByAnchor.has(0) && (
-                    <div className="move-log-variation-row" key="variation-start">
-                      <div className="move-log-number" />
-                      <div className="move-log-variation" style={{ gridColumn: '2 / span 2' }}>
-                        {variationBranchByAnchor.get(0)?.map((branch) => (
-                          <div key={`variation-start-branch-${branch.id}`} className="move-log-variation-line">
-                            {branch.moves.map((move, idx) => (
-                              <button
-                                key={`variation-start-${branch.id}-${idx}`}
-                                type="button"
-                                className={`move-log-variation-btn ${
-                                  highlightedVariation != null
-                                  && highlightedVariation.branchId === branch.id
-                                  && highlightedVariation.moveIndex === idx
-                                    ? 'active'
-                                    : ''
-                                }`}
-                                onClick={() => void onJumpToVariationMove(branch, idx, !autoAnalyzeOnNavigation)}
-                              >
-                                {variationMoveLabel(move)}
-                              </button>
-                            ))}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {moveLogRows.map((row, rowIdx) => {
-                    const p0TargetSnapshot = row.p0?.result_snapshot_index ?? null;
-                    const p1TargetSnapshot = row.p1?.result_snapshot_index ?? null;
-                    const rowBranches = [
-                      ...(p0TargetSnapshot != null ? (variationBranchByAnchor.get(p0TargetSnapshot) ?? []) : []),
-                      ...(p1TargetSnapshot != null ? (variationBranchByAnchor.get(p1TargetSnapshot) ?? []) : []),
-                    ];
-                    return (
-                      <Fragment key={`move-row-${row.moveNumberLabel}-${rowIdx}`}>
-                        <div className="move-log-row">
+                  {moveLogTokens.map((token, tokenIdx) => {
+                    if (token.kind === 'mainline_row') {
+                      const { row, rowIdx } = token;
+                      const p0Snap = row.p0?.result_snapshot_index ?? null;
+                      const p1Snap = row.p1?.result_snapshot_index ?? null;
+                      return (
+                        <div key={`ml-${row.moveNumberLabel}-${rowIdx}`} className="move-log-row" role="listitem">
                           <div className="move-log-number">{row.moveNumberLabel}.</div>
                           <button
                             type="button"
-                            className={`move-log-btn ${
-                              isHighlightedMainlineMove(row.p0)
-                                ? 'active'
-                                : ''
-                            }`}
-                            disabled={
-                              p0TargetSnapshot == null
-                              || isHighlightedMainlineMove(row.p0)
-                            }
+                            className={`move-log-btn${isHighlightedMainlineMove(row.p0) ? ' active' : ''}`}
+                            disabled={p0Snap == null || isHighlightedMainlineMove(row.p0)}
                             onClick={() => {
-                              if (p0TargetSnapshot != null) {
-                                const isLoadedMainlineExtension =
-                                  loadedHistoricalMainlineLengthRef.current > 0
-                                  && p0TargetSnapshot > loadedHistoricalMainlineTailSnapshotRef.current;
-                                if (isLoadedMainlineExtension) {
-                                  void onJumpToLoadedMainlineExtension(p0TargetSnapshot, !autoAnalyzeOnNavigation);
-                                } else {
-                                  void onJumpToSnapshot(p0TargetSnapshot, false, !autoAnalyzeOnNavigation);
-                                }
+                              if (p0Snap != null) {
+                                const isExt = loadedHistoricalMainlineLengthRef.current > 0 && p0Snap > loadedHistoricalMainlineTailSnapshotRef.current;
+                                void (isExt
+                                  ? onJumpToLoadedMainlineExtension(p0Snap, !autoAnalyzeOnNavigation)
+                                  : onJumpToSnapshot(p0Snap, false, !autoAnalyzeOnNavigation));
                               }
                             }}
                           >
@@ -3637,64 +3655,47 @@ const displayedP0EvalRef = useRef<number | null>(null);
                           </button>
                           <button
                             type="button"
-                            className={`move-log-btn ${
-                              isHighlightedMainlineMove(row.p1)
-                                ? 'active'
-                                : ''
-                            }`}
-                            disabled={
-                              p1TargetSnapshot == null
-                              || isHighlightedMainlineMove(row.p1)
-                            }
+                            className={`move-log-btn${isHighlightedMainlineMove(row.p1) ? ' active' : ''}`}
+                            disabled={p1Snap == null || isHighlightedMainlineMove(row.p1)}
                             onClick={() => {
-                              if (p1TargetSnapshot != null) {
-                                const isLoadedMainlineExtension =
-                                  loadedHistoricalMainlineLengthRef.current > 0
-                                  && p1TargetSnapshot > loadedHistoricalMainlineTailSnapshotRef.current;
-                                if (isLoadedMainlineExtension) {
-                                  void onJumpToLoadedMainlineExtension(p1TargetSnapshot, !autoAnalyzeOnNavigation);
-                                } else {
-                                  void onJumpToSnapshot(p1TargetSnapshot, false, !autoAnalyzeOnNavigation);
-                                }
+                              if (p1Snap != null) {
+                                const isExt = loadedHistoricalMainlineLengthRef.current > 0 && p1Snap > loadedHistoricalMainlineTailSnapshotRef.current;
+                                void (isExt
+                                  ? onJumpToLoadedMainlineExtension(p1Snap, !autoAnalyzeOnNavigation)
+                                  : onJumpToSnapshot(p1Snap, false, !autoAnalyzeOnNavigation));
                               }
                             }}
                           >
                             {renderMoveLabel(row.p1)}
                           </button>
                         </div>
-                        {rowBranches.length > 0 && (
-                          <div className="move-log-variation-row">
-                            <div className="move-log-number" />
-                            <div className="move-log-variation" style={{ gridColumn: '2 / span 2' }}>
-                              {rowBranches.map((branch) => (
-                                <div key={`variation-row-${row.moveNumber}-branch-${branch.id}`} className="move-log-variation-line">
-                                  {branch.moves.map((move, idx) => (
-                                    <button
-                                      key={`variation-${row.moveNumber}-${branch.id}-${idx}`}
-                                      type="button"
-                                      className={`move-log-variation-btn ${
-                                        highlightedVariation != null
-                                        && highlightedVariation.branchId === branch.id
-                                        && highlightedVariation.moveIndex === idx
-                                          ? 'active'
-                                          : ''
-                                      }`}
-                                      disabled={
-                                        highlightedVariation != null
-                                        && highlightedVariation.branchId === branch.id
-                                        && highlightedVariation.moveIndex === idx
-                                      }
-                                      onClick={() => void onJumpToVariationMove(branch, idx, !autoAnalyzeOnNavigation)}
-                                    >
-                                      {variationMoveLabel(move)}
-                                    </button>
-                                  ))}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </Fragment>
+                      );
+                    }
+
+                    // deviation_block: render as a single full-width row spanning all columns
+                    const { branch } = token;
+                    const isBranchActive = highlightedVariation?.branchId === branch.id;
+                    return (
+                      <div key={`dev-${branch.id}-${tokenIdx}`} className="move-log-deviation-row" role="listitem">
+                        <span className="move-log-deviation-bracket">(</span>
+                        <span className="move-log-deviation-moves">
+                          {branch.moves.map((move, moveIdx) => {
+                            const isActive = isBranchActive && highlightedVariation?.moveIndex === moveIdx;
+                            return (
+                              <button
+                                key={`dev-move-${branch.id}-${moveIdx}`}
+                                type="button"
+                                className={`move-log-deviation-btn${isActive ? ' active' : ''}`}
+                                disabled={isActive}
+                                onClick={() => void onJumpToVariationMove(branch, moveIdx, !autoAnalyzeOnNavigation)}
+                              >
+                                {renderVariationMove(move)}
+                              </button>
+                            );
+                          })}
+                        </span>
+                        <span className="move-log-deviation-bracket">)</span>
+                      </div>
                     );
                   })}
                 </div>

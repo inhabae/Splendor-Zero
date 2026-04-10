@@ -924,11 +924,9 @@ public:
     py::dict hidden_faceup_reveal_candidates() const {
         ensure_initialized();
         py::dict out;
-        const auto hidden_opponent_cards = hidden_opponent_reserved_cards_by_tier();
         for (int tier = 0; tier < 3; ++tier) {
             const auto& row = state_.faceup[static_cast<std::size_t>(tier)];
             const auto& deck = state_.deck[static_cast<std::size_t>(tier)];
-            const auto& hidden_reserved = hidden_opponent_cards[static_cast<std::size_t>(tier)];
             for (int slot = 0; slot < 4; ++slot) {
                 const Card& current = row[static_cast<std::size_t>(slot)];
                 if (current.id == 0) {
@@ -937,9 +935,6 @@ public:
                 py::list ids;
                 ids.append(py::int_(current.id));
                 for (const Card& card : deck) {
-                    ids.append(py::int_(card.id));
-                }
-                for (const Card& card : hidden_reserved) {
                     ids.append(py::int_(card.id));
                 }
                 out[py::str(std::to_string(tier + 1) + ":" + std::to_string(slot))] = std::move(ids);
@@ -966,15 +961,6 @@ public:
                 for (const Card& card : state_.deck[static_cast<std::size_t>(tier)]) {
                     ids.append(py::int_(card.id));
                 }
-                for (int other_player = 0; other_player < 2; ++other_player) {
-                    const auto& other_reserved = state_.players[static_cast<std::size_t>(other_player)].reserved;
-                    for (const ReservedCard& other : other_reserved) {
-                        if (other.is_public || other.card.id <= 0 || other.card.level != tier + 1) {
-                            continue;
-                        }
-                        ids.append(py::int_(other.card.id));
-                    }
-                }
                 out[py::str(std::string(player_id == 0 ? "P0:" : "P1:") + std::to_string(slot))] = std::move(ids);
             }
         }
@@ -988,9 +974,6 @@ public:
         validate_positive_card_id(card_id);
 
         Card& current = state_.faceup[static_cast<std::size_t>(tier)][static_cast<std::size_t>(slot)];
-        if (current.id <= 0) {
-            throw std::runtime_error("Face-up slot is empty");
-        }
         if (current.id == card_id) {
             return make_step_result();
         }
@@ -999,25 +982,16 @@ public:
         auto deck_it = find_card_by_id(deck, card_id);
         if (deck_it != deck.end()) {
             const Card replacement = *deck_it;
-            *deck_it = current;
+            if (current.id > 0) {
+                *deck_it = current;
+            } else {
+                deck.erase(deck_it);
+            }
             current = replacement;
             return make_step_result();
         }
 
-        const int current_player = state_.current_player;
-        if (current_player < 0 || current_player >= 2) {
-            throw std::runtime_error("Current player out of range");
-        }
-        Player& opponent = state_.players[static_cast<std::size_t>(1 - current_player)];
-        for (ReservedCard& reserved : opponent.reserved) {
-            if (reserved.is_public || reserved.card.level != tier + 1 || reserved.card.id != card_id) {
-                continue;
-            }
-            std::swap(current, reserved.card);
-            return make_step_result();
-        }
-
-        throw std::runtime_error("Requested card is not available in the hidden candidate pool for that face-up slot");
+        throw std::runtime_error("Requested card is not available in the hidden deck pool for that face-up slot");
     }
 
     StepResult set_faceup_card_any(int tier, int slot, int card_id) {
@@ -1159,23 +1133,7 @@ public:
             return make_step_result();
         }
 
-        for (int other_player_id = 0; other_player_id < 2; ++other_player_id) {
-            auto& other_reserved = state_.players[static_cast<std::size_t>(other_player_id)].reserved;
-            for (int other_slot = 0; other_slot < static_cast<int>(other_reserved.size()); ++other_slot) {
-                if (other_player_id == player_id && other_slot == slot) {
-                    continue;
-                }
-                ReservedCard& other = other_reserved[static_cast<std::size_t>(other_slot)];
-                if (other.is_public || other.card.level != tier + 1 || other.card.id != card_id) {
-                    continue;
-                }
-                std::swap(current.card, other.card);
-                current.is_public = true;
-                return make_step_result();
-            }
-        }
-
-        throw std::runtime_error("Requested card is not available in the hidden candidate pool for that reserved slot");
+        throw std::runtime_error("Requested card is not available in the hidden deck pool for that reserved slot");
     }
 
 private:
