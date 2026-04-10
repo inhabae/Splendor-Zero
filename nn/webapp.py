@@ -2544,7 +2544,7 @@ class GameManager:
         label = _describe_action(action_idx)
         result_turn_index = self._turn_index + 1
         result_snapshot_index = (
-            int(self._snapshot_history_index) + 1
+            len(self._snapshot_history)
             if self._snapshot_history_index is not None and self._snapshot_history
             else result_turn_index
         )
@@ -2567,7 +2567,10 @@ class GameManager:
 
     def _record_event_locked(self, event: GameEvent) -> None:
         if self._snapshot_history_index is not None and self._snapshot_history:
-            del self._snapshot_history[self._snapshot_history_index + 1:]
+            # In analysis mode we need loaded/mainline snapshot indices to stay
+            # stable so deviation branches can coexist with future mainline
+            # positions. Appending branch snapshots at the end preserves the
+            # original indices instead of truncating and reusing them.
             self._snapshot_history.append(
                 SavedStateDTO(
                     turn_index=int(self._turn_index),

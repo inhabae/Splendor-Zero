@@ -22,7 +22,7 @@ import {
   TokenCountsDTO,
 } from './types';
 import { GameBoard } from './components/board/GameBoard';
-import { ActionLabel, actionTextLabel } from './components/ActionLabel';
+import { ActionLabel } from './components/ActionLabel';
 import { CardView } from './components/board/CardView';
 import { NobleView } from './components/board/NobleView';
 
@@ -248,6 +248,7 @@ const [displayedP0EvalValue, setDisplayedP0EvalValue] = useState<number | null>(
   const [isLoadedPostAnalysisGame, setIsLoadedPostAnalysisGame] = useState(false);
   const [isDeepAnalysisRunning, setIsDeepAnalysisRunning] = useState(false);
   const [deepAnalysisProgress, setDeepAnalysisProgress] = useState<{ done: number; total: number } | null>(null);
+  const [activeVariationSelection, setActiveVariationSelection] = useState<HighlightedVariation | null>(null);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -258,6 +259,16 @@ const [displayedP0EvalValue, setDisplayedP0EvalValue] = useState<number | null>(
   const variationBranchIdCounterRef = useRef<number>(1);
   const loadedHistoricalMainlineLengthRef = useRef<number>(0);
   const loadedHistoricalMainlineTailSnapshotRef = useRef<number>(0);
+
+  function clearActiveVariationSelection(): void {
+    activeVariationBranchIdRef.current = null;
+    setActiveVariationSelection(null);
+  }
+
+  function selectVariationMove(branchId: number, moveIndex: number): void {
+    activeVariationBranchIdRef.current = branchId;
+    setActiveVariationSelection({ branchId, moveIndex });
+  }
   const loadedSavedGameRef = useRef<SavedGameWithDeepAnalysisDTO | null>(null);
   const loadInputRef = useRef<HTMLInputElement | null>(null);
   const analysisSettingsRef = useRef<HTMLDivElement | null>(null);
@@ -512,44 +523,15 @@ const displayedP0EvalRef = useRef<number | null>(null);
     return null;
   }, [moveLogDisplayEntries, currentSnapshotIndex]);
   const highlightedVariation = useMemo<HighlightedVariation | null>(() => {
-    if (!snapshot) {
+    if (!activeVariationSelection) {
       return null;
     }
-    for (const branch of variationBranches) {
-      for (let idx = 0; idx < branch.moves.length; idx += 1) {
-        const move = branch.moves[idx];
-        if (move.jumpBySnapshot && move.targetSnapshotIndex === currentSnapshotIndex) {
-          return { branchId: branch.id, moveIndex: idx };
-        }
-      }
+    const branch = variationBranches.find((item) => item.id === activeVariationSelection.branchId) ?? null;
+    if (!branch || activeVariationSelection.moveIndex < 0 || activeVariationSelection.moveIndex >= branch.moves.length) {
+      return null;
     }
-    // Branched positions do not always map to a mainline snapshot index,
-    // or the stored targetSnapshotIndex may differ from the replayed snapshot index.
-    // Always fall back to matching by turn index on the active branch first,
-    // then try all branches.
-    const activeBranchId = activeVariationBranchIdRef.current;
-    if (activeBranchId != null) {
-      const activeBranch = variationBranches.find((branch) => branch.id === activeBranchId) ?? null;
-      if (activeBranch) {
-        for (let idx = activeBranch.moves.length - 1; idx >= 0; idx -= 1) {
-          if (activeBranch.moves[idx].targetTurnIndex === snapshot.turn_index) {
-            return { branchId: activeBranch.id, moveIndex: idx };
-          }
-        }
-      }
-    }
-    if (snapshot.current_snapshot_index == null) {
-      for (const branch of variationBranches) {
-        for (let idx = branch.moves.length - 1; idx >= 0; idx -= 1) {
-          const move = branch.moves[idx];
-          if (move.targetTurnIndex === snapshot.turn_index) {
-            return { branchId: branch.id, moveIndex: idx };
-          }
-        }
-      }
-    }
-    return null;
-  }, [variationBranches, currentSnapshotIndex, snapshot]);
+    return activeVariationSelection;
+  }, [activeVariationSelection, variationBranches]);
   function isHighlightedMainlineMove(move: MoveLogDisplayEntry | null | undefined): boolean {
     if (!move || highlightedVariation != null || highlightedMove == null) {
       return false;
@@ -918,7 +900,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setIsLoadedPostAnalysisGame(false);
     setDeepAnalysisProgress(null);
     setIsDeepAnalysisRunning(false);
-    activeVariationBranchIdRef.current = null;
+    clearActiveVariationSelection();
     lastAutoAnalyzeKeyRef.current = null;
 
     if (!checkpointId) {
@@ -967,7 +949,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setIsLoadedPostAnalysisGame(false);
     setDeepAnalysisProgress(null);
     setIsDeepAnalysisRunning(false);
-    activeVariationBranchIdRef.current = null;
+    clearActiveVariationSelection();
     lastAutoAnalyzeKeyRef.current = null;
     setHomeView('ANALYSIS');
   }
@@ -989,7 +971,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setIsLoadedPostAnalysisGame(false);
     setDeepAnalysisProgress(null);
     setIsDeepAnalysisRunning(false);
-    activeVariationBranchIdRef.current = null;
+    clearActiveVariationSelection();
     setRevealSelections({});
     setActiveRevealKey(null);
     setLiveSaveStatus(null);
@@ -1269,7 +1251,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
           const isDeviation = isOnMainlineSnapshot && expectedMainlineMove != null && expectedMainlineMove.action_idx !== actionIdx;
           if (isDeviation) {
             const branchId = variationBranchIdCounterRef.current++;
-            activeVariationBranchIdRef.current = branchId;
+            selectVariationMove(branchId, 0);
             setVariationBranches((prev) => [
               ...prev,
               {
@@ -1292,13 +1274,19 @@ const displayedP0EvalRef = useRef<number | null>(null);
           }
         } else {
           const activeId = activeVariationBranchIdRef.current;
+          const selectedMoveIndex = activeVariationSelection?.branchId === activeId
+            ? activeVariationSelection.moveIndex
+            : null;
           setVariationBranches((prev) => prev.map((branch) => {
             if (branch.id !== activeId) {
               return branch;
             }
+            const preservedMoves = selectedMoveIndex != null
+              ? branch.moves.slice(0, selectedMoveIndex + 1)
+              : branch.moves;
             return {
               ...branch,
-              moves: [...branch.moves, {
+              moves: [...preservedMoves, {
                 kind: 'move',
                 actor,
                 actionIdx,
@@ -1306,7 +1294,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
                 label,
                 display,
                 fullMoveNumber: (() => {
-                  const last = branch.moves[branch.moves.length - 1];
+                  const last = preservedMoves[preservedMoves.length - 1];
                   if (!last) return baseFullMoveNumber;
                   return last.actor === 'P1' && actor === 'P0'
                     ? last.fullMoveNumber + 1
@@ -1318,6 +1306,9 @@ const displayedP0EvalRef = useRef<number | null>(null);
               }],
             };
           }));
+          if (activeId != null) {
+            selectVariationMove(activeId, (selectedMoveIndex ?? -1) + 1);
+          }
         }
       }
 
@@ -1442,7 +1433,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     clearPolling();
     setJobStatus(null);
     if (!keepActiveVariationBranch) {
-      activeVariationBranchIdRef.current = null;
+      clearActiveVariationSelection();
     }
     try {
       const shouldSuppressAutoAnalyze = suppressAutoAnalyze || isLoadedPostAnalysisGame;
@@ -1477,7 +1468,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     clearPolling();
     setJobStatus(null);
     if (!keepActiveVariationBranch) {
-      activeVariationBranchIdRef.current = null;
+      clearActiveVariationSelection();
     }
     // Preserve the loaded mainline whenever we jump to a historical snapshot,
     // because the server's move_log on the returned snapshot reflects only
@@ -1572,7 +1563,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setError(null);
     clearPolling();
     setJobStatus(null);
-    activeVariationBranchIdRef.current = null;
+    clearActiveVariationSelection();
 
     try {
       // Appended post-load mainline moves now live in backend snapshot history,
@@ -1622,7 +1613,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     }
 
     // Stepping the mainline always exits any active deviation.
-    activeVariationBranchIdRef.current = null;
+    clearActiveVariationSelection();
 
     const useTurnNavigation = snapshot.current_snapshot_index == null && !isLoadedMainlineExtensionState;
     const navigationTargets = useTurnNavigation ? mainlineMoveTurnIndices : mainlineMoveSnapshotIndices;
@@ -1672,7 +1663,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setError(null);
     clearPolling();
     setJobStatus(null);
-    activeVariationBranchIdRef.current = branch.id;
+    selectVariationMove(branch.id, moveIndex);
 
     try {
       // Always rebuild branch state from its anchor snapshot to avoid
@@ -1730,12 +1721,6 @@ const displayedP0EvalRef = useRef<number | null>(null);
     }
   }
 
-  function variationMoveLabel(move: VariationMove): string {
-    const moveNumber = Math.max(1, move.fullMoveNumber);
-    const prefix = move.actor === 'P0' ? `${moveNumber}.` : `${moveNumber}...`;
-    return `${prefix} ${actionTextLabel(move.actionIdx)}`;
-  }
-
   function renderVariationMove(move: VariationMove): JSX.Element {
     if (move.kind !== 'move') {
       return (
@@ -1777,7 +1762,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
         return;
       }
       const branchId = variationBranchIdCounterRef.current++;
-      activeVariationBranchIdRef.current = branchId;
+      selectVariationMove(branchId, 0);
       setVariationBranches((prev) => [
         ...prev,
         {
@@ -1800,18 +1785,24 @@ const displayedP0EvalRef = useRef<number | null>(null);
     }
 
     const activeId = activeVariationBranchIdRef.current;
+    const selectedMoveIndex = activeVariationSelection?.branchId === activeId
+      ? activeVariationSelection.moveIndex
+      : null;
     setVariationBranches((prev) => prev.map((branch) => {
       if (branch.id !== activeId) {
         return branch;
       }
-      const last = branch.moves[branch.moves.length - 1];
+      const preservedMoves = selectedMoveIndex != null
+        ? branch.moves.slice(0, selectedMoveIndex + 1)
+        : branch.moves;
+      const last = preservedMoves[preservedMoves.length - 1];
       const fullMoveNumber = !last
         ? baseFullMoveNumber
         : (last.actor === 'P1' && actor === 'P0' ? last.fullMoveNumber + 1 : last.fullMoveNumber);
       return {
         ...branch,
         moves: [
-          ...branch.moves,
+          ...preservedMoves,
           {
             kind,
             actor,
@@ -1826,6 +1817,9 @@ const displayedP0EvalRef = useRef<number | null>(null);
         ],
       };
     }));
+    if (activeId != null) {
+      selectVariationMove(activeId, (selectedMoveIndex ?? -1) + 1);
+    }
   }
 
   async function onRevealCardWithId(tier: number, slot: number, cardId?: number): Promise<void> {
@@ -2061,7 +2055,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
     setIsLoadedPostAnalysisGame(false);
     setDeepAnalysisProgress(null);
     setIsDeepAnalysisRunning(false);
-    activeVariationBranchIdRef.current = null;
+    clearActiveVariationSelection();
     setRevealSelections({});
     setActiveRevealKey(null);
     lastAutoAnalyzeKeyRef.current = null;
@@ -2109,7 +2103,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
       setIsLoadedPostAnalysisGame(hasRestoredDeepAnalysis);
       setLoadedMoveLog(nextSnapshot.move_log);
       setVariationBranches([]);
-      activeVariationBranchIdRef.current = null;
+      clearActiveVariationSelection();
       setHomeView(deriveHomeViewFromSnapshot(nextSnapshot));
       await handleSnapshotUpdate(nextSnapshot, false, restoredSearch, hasRestoredDeepAnalysis);
     } catch (err) {
