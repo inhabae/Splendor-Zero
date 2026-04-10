@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import random
 from dataclasses import dataclass, field
 from typing import Literal
@@ -32,8 +33,11 @@ class DeterminizedPolicyResult:
 @dataclass
 class AlphaBetaConfig:
     depth: int = 3
-    """Maximum search depth (in plies). Same-player sub-turns count as a ply
-    but do NOT switch perspective."""
+    """Maximum search depth (in opponent-changing plies).
+
+    Same-player modal sub-turns such as gem returns and noble choices are
+    resolved within the same ply so search never stops on those states.
+    """
     chance_node_samples: int = 4
     """Number of card draws to sample when a deck draw occurs mid-search.
     Set to 1 to disable chance nodes (reverts to single-determinization behaviour).
@@ -59,6 +63,19 @@ def _nn_evaluate(model, env: SplendorNativeEnv, state, device: str) -> tuple[np.
     policy = logits[0].cpu().numpy().astype(np.float32)
     value = float(value_t[0].cpu().numpy()) if value_t.ndim == 1 else float(value_t[0, 0].cpu().numpy())
     return policy, value
+
+
+def _terminal_value_for_player(winner: int, player_id: int) -> float:
+    if winner == -1:
+        return 0.0
+    return 1.0 if winner == player_id else -1.0
+
+
+def _is_modal_subturn_state(state) -> bool:
+    return bool(
+        getattr(state, "is_return_phase", False)
+        or getattr(state, "is_noble_choice_phase", False)
+    )
 
 
 
@@ -248,11 +265,9 @@ def _alphabeta_with_clone(
     if parent_state.is_terminal:
         w = parent_state.winner
         cp = parent_state.current_player_id
-        if w == -1:
-            return 0.0
-        return 1.0 if w == cp else -1.0
+        return _terminal_value_for_player(w, cp)
 
-    if depth <= 0:
+    if depth <= 0 and not _is_modal_subturn_state(parent_state):
         _, value = _nn_evaluate(model, parent_env, parent_state, device)
         return value
 
@@ -261,8 +276,9 @@ def _alphabeta_with_clone(
     if not legal_actions:
         return 0.0
 
-    policy, _ = _nn_evaluate(model, parent_env, parent_state, device)
-    legal_actions.sort(key=lambda a: -policy[a])
+    if not _is_modal_subturn_state(parent_state):
+        policy, _ = _nn_evaluate(model, parent_env, parent_state, device)
+        legal_actions.sort(key=lambda a: -policy[a])
 
     current_player = parent_state.current_player_id
     pre_export = parent_env.export_state()
@@ -275,20 +291,21 @@ def _alphabeta_with_clone(
         post_export = step_env.export_state()
 
         same_player = (child_state.current_player_id == current_player)
+        next_depth = depth if same_player else depth - 1
 
         # Determine whether this action may have triggered a deck draw
         # and route through the chance node evaluator.
         if same_player:
             child_value = _alphabeta_chance(
                 step_env, post_export, pre_export, action,
-                current_player, depth - 1,
+                current_player, next_depth,
                 alpha, beta, model, device,
                 root_player=root_player, config=config, rng=rng,
             )
         else:
             child_value = -_alphabeta_chance(
                 step_env, post_export, pre_export, action,
-                current_player, depth - 1,
+                current_player, next_depth,
                 -beta, -alpha, model, device,
                 root_player=root_player, config=config, rng=rng,
             )
@@ -382,6 +399,107 @@ class ForcedChildSearchConfig:
     eval_batch_size: int = 1
 
 
+_RETURN_ACTION_LO = 61
+_RETURN_ACTION_HI = 65
+_NOBLE_ACTION_LO = 66
+_NOBLE_ACTION_HI = 68
+
+
+@dataclass(frozen=True)
+class _ForcedChildResolvedOutcome:
+    state_key: str
+    state_payload: dict
+    turns_taken: int
+    is_terminal: bool
+    winner: int
+    current_player_id: int
+
+
+def _legal_actions_from_state(state) -> list[int]:
+    mask = np.asarray(state.mask, dtype=bool)
+    return np.where(mask)[0].tolist()
+
+
+def _is_forced_child_modal_subturn(state) -> bool:
+    legal_actions = _legal_actions_from_state(state)
+    if not legal_actions:
+        return False
+    legal = np.asarray(legal_actions, dtype=np.int32)
+    return bool(
+        np.all((legal >= _RETURN_ACTION_LO) & (legal <= _RETURN_ACTION_HI))
+        or np.all((legal >= _NOBLE_ACTION_LO) & (legal <= _NOBLE_ACTION_HI))
+    )
+
+
+def _canonical_exported_state_key(payload: dict) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _collect_forced_child_resolved_outcomes(
+    env: SplendorNativeEnv,
+    state,
+    *,
+    turns_taken: int,
+    out: dict[str, _ForcedChildResolvedOutcome],
+) -> None:
+    if state.is_terminal or not _is_forced_child_modal_subturn(state):
+        payload = env.export_state()
+        key = _canonical_exported_state_key(payload)
+        if key not in out:
+            out[key] = _ForcedChildResolvedOutcome(
+                state_key=key,
+                state_payload=payload,
+                turns_taken=int(turns_taken),
+                is_terminal=bool(state.is_terminal),
+                winner=int(state.winner),
+                current_player_id=int(state.current_player_id),
+            )
+        return
+
+    current_player = int(state.current_player_id)
+    for action in sorted(_legal_actions_from_state(state)):
+        child_env = env.clone()
+        child_state = child_env.step(action)
+        next_turns_taken = turns_taken if int(child_state.current_player_id) == current_player else turns_taken + 1
+        _collect_forced_child_resolved_outcomes(
+            child_env,
+            child_state,
+            turns_taken=next_turns_taken,
+            out=out,
+        )
+
+
+def _sorted_forced_child_outcomes(
+    env: SplendorNativeEnv,
+    state,
+    *,
+    turns_taken: int,
+) -> list[_ForcedChildResolvedOutcome]:
+    outcomes: dict[str, _ForcedChildResolvedOutcome] = {}
+    _collect_forced_child_resolved_outcomes(
+        env,
+        state,
+        turns_taken=turns_taken,
+        out=outcomes,
+    )
+    return sorted(
+        outcomes.values(),
+        key=lambda outcome: (0 if outcome.is_terminal else 1, outcome.state_key),
+    )
+
+
+def _split_forced_child_budget(total_budget: int, num_states: int) -> list[int]:
+    if num_states <= 0:
+        return []
+    if total_budget <= 0:
+        return [0] * num_states
+    if total_budget >= num_states:
+        base = total_budget // num_states
+        remainder = total_budget % num_states
+        return [base + (1 if idx < remainder else 0) for idx in range(num_states)]
+    return [1 if idx < total_budget else 0 for idx in range(num_states)]
+
+
 def run_forced_child_search(
     env: SplendorNativeEnv,
     model,
@@ -429,40 +547,65 @@ def run_forced_child_search(
     for action in legal_actions:
         child_env = env.clone()
         child_state = child_env.step(action)
+        same_player = (int(child_state.current_player_id) == current_player)
+        child_turns_taken = turns_taken if same_player else turns_taken + 1
 
-        if child_state.is_terminal:
-            # Immediate terminal — use exact outcome
-            w = child_state.winner
-            cp_at_child = child_state.current_player_id
-            if w == -1:
-                raw_value = 0.0
+        resolved_outcomes = _sorted_forced_child_outcomes(
+            child_env,
+            child_state,
+            turns_taken=child_turns_taken,
+        )
+
+        best_outcome_value = -float("inf")
+        nonterminal_outcomes = [outcome for outcome in resolved_outcomes if not outcome.is_terminal]
+        nonterminal_budgets = _split_forced_child_budget(
+            int(cfg.simulations_per_child),
+            len(nonterminal_outcomes),
+        )
+
+        for outcome in resolved_outcomes:
+            if outcome.is_terminal:
+                value_from_root = _terminal_value_for_player(outcome.winner, current_player)
             else:
-                raw_value = 1.0 if w == cp_at_child else -1.0
-            same_player = (cp_at_child == current_player)
-        else:
-            same_player = (child_state.current_player_id == current_player)
-            child_turns_taken = turns_taken if same_player else turns_taken + 1
-            child_rng = random.Random(py_rng.getrandbits(64))
-            child_result = run_mcts(
-                child_env,
-                model,
-                child_state,
-                turns_taken=child_turns_taken,
-                device=device,
-                config=mcts_cfg,
-                rng=child_rng,
-            )
-            # root_best_value is from the perspective of the player-to-move
-            # at the child root (i.e. child_state.current_player_id)
-            raw_value = float(child_result.root_best_value)
+                budget = nonterminal_budgets.pop(0)
+                if budget <= 0:
+                    continue
+                outcome_env = env.clone()
+                outcome_state = outcome_env.load_state(outcome.state_payload)
+                outcome_rng = random.Random(py_rng.getrandbits(64))
+                outcome_result = run_mcts(
+                    outcome_env,
+                    model,
+                    outcome_state,
+                    turns_taken=int(outcome.turns_taken),
+                    device=device,
+                    config=MCTSConfig(
+                        num_simulations=int(budget),
+                        c_puct=float(cfg.c_puct),
+                        temperature_moves=0,
+                        temperature=0.0,
+                        root_dirichlet_noise=False,
+                        eval_batch_size=int(cfg.eval_batch_size),
+                    ),
+                    rng=outcome_rng,
+                )
+                raw_value = float(outcome_result.root_best_value)
+                value_from_root = (
+                    raw_value
+                    if int(outcome.current_player_id) == current_player
+                    else -raw_value
+                )
 
-        # Convert to root player's perspective
-        value_from_root = raw_value if same_player else -raw_value
+            if value_from_root > best_outcome_value:
+                best_outcome_value = value_from_root
 
-        child_values[action] = value_from_root
-        q_values[action] = np.float32(value_from_root)
-        if value_from_root > best_value:
-            best_value = value_from_root
+        if best_outcome_value == -float("inf"):
+            best_outcome_value = 0.0
+
+        child_values[action] = best_outcome_value
+        q_values[action] = np.float32(best_outcome_value)
+        if best_outcome_value > best_value:
+            best_value = best_outcome_value
             best_action = action
 
     # Build visit_probs proportional to shifted values so callers can inspect
