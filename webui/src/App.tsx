@@ -8,6 +8,7 @@ import {
   CheckpointDTO,
   ColorCountsDTO,
   EngineJobStatusDTO,
+  EngineThinkRequest,
   EngineThinkResponse,
   GameSnapshotDTO,
   LiveSaveStatusDTO,
@@ -35,6 +36,7 @@ const POLL_MS = 400;
 const LIVE_POLL_MS = 1000;
 const LIVE_SEARCH_MAX_SIMULATIONS = 500_000;
 const DEFAULT_DEEP_ANALYSIS_SIMULATIONS = 50_000;
+const DEFAULT_ALPHABETA_DEPTH = 3;
 
 function isContinuationAction(actionIdx: number): boolean {
   return actionIdx >= 61 && actionIdx <= 68;
@@ -108,6 +110,19 @@ type DeepAnalysisSearchResult = NonNullable<EngineJobStatusDTO['result']>;
 
 function moveAnalysisKey(move: Pick<MoveLogEntryDTO, 'result_snapshot_index' | 'turn_index' | 'actor' | 'action_idx'>): string {
   return `${move.result_snapshot_index}:${move.turn_index}:${move.actor}:${move.action_idx}`;
+}
+
+function searchTypeLabel(searchType: SearchType): string {
+  if (searchType === 'ismcts') {
+    return 'ISMCTS';
+  }
+  if (searchType === 'alphabeta') {
+    return 'Alpha-Beta';
+  }
+  if (searchType === 'forced_child') {
+    return 'Forced Search';
+  }
+  return 'MCTS';
 }
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
@@ -225,6 +240,7 @@ export function App() {
   const [searchSimulations, setSearchSimulations] = useState(400);
   const [deepAnalysisSimulations, setDeepAnalysisSimulations] = useState(DEFAULT_DEEP_ANALYSIS_SIMULATIONS);
   const [searchType, setSearchType] = useState<SearchType>('mcts');
+  const [alphabetaDepth, setAlphabetaDepth] = useState(DEFAULT_ALPHABETA_DEPTH);
   const [playerSeat] = useState<Seat>('P0');
   const [seed] = useState('');
   const [homeView, setHomeView] = useState<HomeView>('HOME');
@@ -830,28 +846,56 @@ const displayedP0EvalRef = useRef<number | null>(null);
     return match?.id ?? null;
   }
 
+  function buildEngineThinkRequest(options?: {
+    searchTypeOverride?: SearchType;
+    snapshotOverride?: GameSnapshotDTO | null;
+    simulationsOverride?: number;
+    forcedRootActionIdx?: number;
+  }): EngineThinkRequest {
+    const activeSearchType = options?.searchTypeOverride ?? searchType;
+    const baseSnapshot = options?.snapshotOverride ?? snapshot;
+    const fallback = baseSnapshot?.config?.num_simulations ?? numSimulations;
+    const requestedSimulations = options?.simulationsOverride ?? searchSimulations;
+    const nextNumSimulations =
+      Number.isInteger(requestedSimulations) && requestedSimulations >= 1
+        ? requestedSimulations
+        : fallback;
+
+    if (activeSearchType === 'alphabeta') {
+      return {
+        search_type: activeSearchType,
+        continuous_until_cancel: false,
+        alphabeta_depth: alphabetaDepth,
+        ...(options?.forcedRootActionIdx != null ? { forced_root_action_idx: options.forcedRootActionIdx } : {}),
+      };
+    }
+
+    if (activeSearchType === 'forced_child') {
+      return {
+        search_type: activeSearchType,
+        continuous_until_cancel: false,
+        forced_child_simulations_per_action: nextNumSimulations,
+        ...(options?.forcedRootActionIdx != null ? { forced_root_action_idx: options.forcedRootActionIdx } : {}),
+      };
+    }
+
+    return {
+      num_simulations: nextNumSimulations,
+      search_type: activeSearchType,
+      continuous_until_cancel: homeView === 'LIVE',
+      max_total_simulations: homeView === 'LIVE' ? LIVE_SEARCH_MAX_SIMULATIONS : nextNumSimulations,
+      ...(options?.forcedRootActionIdx != null ? { forced_root_action_idx: options.forcedRootActionIdx } : {}),
+    };
+  }
+
   async function startEngineThink(options?: {
     searchTypeOverride?: SearchType;
     snapshotOverride?: GameSnapshotDTO | null;
   }): Promise<void> {
     setError(null);
-    const requested = searchSimulations;
-    const baseSnapshot = options?.snapshotOverride ?? snapshot;
-    const fallback = baseSnapshot?.config?.num_simulations ?? numSimulations;
-    const nextNumSimulations =
-      Number.isInteger(requested) && requested >= 1
-        ? requested
-        : fallback;
-    const thinkRequest: Record<string, unknown> = {
-      num_simulations: nextNumSimulations,
-      search_type: options?.searchTypeOverride ?? searchType,
-      continuous_until_cancel: homeView === 'LIVE',
-      max_total_simulations: homeView === 'LIVE' ? LIVE_SEARCH_MAX_SIMULATIONS : nextNumSimulations,
-    };
-
     const think = await fetchJSON<EngineThinkResponse>('/api/game/engine-think', {
       method: 'POST',
-      body: JSON.stringify(thinkRequest),
+      body: JSON.stringify(buildEngineThinkRequest(options)),
     });
     setUiStatus('WAITING_ENGINE');
     clearPolling();
@@ -1056,13 +1100,11 @@ const displayedP0EvalRef = useRef<number | null>(null);
   ): Promise<EngineJobStatusDTO> {
     const think = await fetchJSON<EngineThinkResponse>('/api/game/engine-think', {
       method: 'POST',
-      body: JSON.stringify({
-        num_simulations: simulations,
-        search_type: searchTypeOverride ?? searchType,
-        continuous_until_cancel: false,
-        max_total_simulations: simulations,
-        ...(forcedRootActionIdx != null ? { forced_root_action_idx: forcedRootActionIdx } : {}),
-      }),
+      body: JSON.stringify(buildEngineThinkRequest({
+        searchTypeOverride,
+        simulationsOverride: simulations,
+        forcedRootActionIdx,
+      })),
     });
     for (;;) {
       await waitMs(200);
@@ -1090,7 +1132,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
   }
 
   async function onRunDeepAnalysis(): Promise<void> {
-    if (!snapshot || moveLogEntries.length === 0 || isDeepAnalysisRunning || deepAnalysisSimulations < 1) {
+    if (!snapshot || moveLogEntries.length === 0 || isDeepAnalysisRunning || !canRunDeepAnalysisForCurrentSearch) {
       return;
     }
 
@@ -2112,6 +2154,52 @@ const displayedP0EvalRef = useRef<number | null>(null);
   }
 
   const canStart = Boolean(selectedCheckpoint) && numSimulations > 0 && numSimulations <= 10000;
+  const isTreeSearchType = searchType === 'mcts' || searchType === 'ismcts';
+  const canRunCurrentSearch = (() => {
+    if (searchType === 'alphabeta') {
+      return alphabetaDepth >= 1;
+    }
+    if (searchType === 'forced_child') {
+      return searchSimulations >= 1;
+    }
+    return searchSimulations >= 1;
+  })();
+  const canRunDeepAnalysisForCurrentSearch = (() => {
+    if (searchType === 'alphabeta') {
+      return alphabetaDepth >= 1;
+    }
+    return deepAnalysisSimulations >= 1;
+  })();
+  const searchSettingsSummary = (() => {
+    if (searchType === 'alphabeta') {
+      return `${searchTypeLabel(searchType)} • depth ${alphabetaDepth}`;
+    }
+    if (searchType === 'forced_child') {
+      return `${searchTypeLabel(searchType)} • ${searchSimulations.toLocaleString()} per action`;
+    }
+    if (homeView === 'LIVE') {
+      return `${searchTypeLabel(searchType)} • publish every ${searchSimulations.toLocaleString()} sims`;
+    }
+    return `${searchTypeLabel(searchType)} • ${searchSimulations.toLocaleString()} sims`;
+  })();
+  const deepAnalysisSettingsLabel = (() => {
+    if (searchType === 'alphabeta') {
+      return 'Depth';
+    }
+    if (searchType === 'forced_child') {
+      return 'Per Action';
+    }
+    return 'Deep';
+  })();
+  const deepAnalysisSettingsTitle = (() => {
+    if (searchType === 'alphabeta') {
+      return 'Alpha-Beta depth per move';
+    }
+    if (searchType === 'forced_child') {
+      return 'Forced search simulations per action for each move';
+    }
+    return 'Deep analysis simulations per move';
+  })();
   const activeReveal = useMemo(() => {
     if (!snapshot || !activeRevealKey) {
       return null;
@@ -3162,8 +3250,14 @@ const displayedP0EvalRef = useRef<number | null>(null);
                   <button
                     type="button"
                     onClick={() => void onRunDeepAnalysis()}
-                    disabled={isDeepAnalysisRunning || moveLogEntries.length === 0 || deepAnalysisSimulations < 1}
-                    title={`Run deep analysis across all logged moves (${deepAnalysisSimulations.toLocaleString()} sims per move)`}
+                    disabled={isDeepAnalysisRunning || moveLogEntries.length === 0 || !canRunDeepAnalysisForCurrentSearch}
+                    title={
+                      searchType === 'alphabeta'
+                        ? `Run deep analysis across all logged moves (depth ${alphabetaDepth})`
+                        : searchType === 'forced_child'
+                          ? `Run deep analysis across all logged moves (${deepAnalysisSimulations.toLocaleString()} per-action sims)`
+                          : `Run deep analysis across all logged moves (${deepAnalysisSimulations.toLocaleString()} sims per move)`
+                    }
                   >
                     {isDeepAnalysisRunning ? 'Running Deep Analysis...' : 'Run Deep Analysis'}
                   </button>
@@ -3364,9 +3458,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
                   <button
                     type="button"
                     className={`analysis-settings-btn ${showAnalysisSettings ? 'active' : ''}`}
-                    title={homeView === 'LIVE'
-                      ? `${searchType.toUpperCase()} • publish every ${searchSimulations.toLocaleString()} sims`
-                      : `${searchType.toUpperCase()} • ${searchSimulations.toLocaleString()} sims`}
+                    title={searchSettingsSummary}
                     aria-expanded={showAnalysisSettings}
                     aria-haspopup="dialog"
                     onClick={() => setShowAnalysisSettings((value) => !value)}
@@ -3386,28 +3478,54 @@ const displayedP0EvalRef = useRef<number | null>(null);
                           >
                             <option value="mcts">MCTS</option>
                             <option value="ismcts">ISMCTS</option>
+                            <option value="alphabeta">Alpha-Beta</option>
+                            <option value="forced_child">Forced Search</option>
                           </select>
-                          <input
-                            type="number"
-                            min={1}
-                            max={LIVE_SEARCH_MAX_SIMULATIONS}
-                            value={searchSimulations}
-                            onChange={(event) => setSearchSimulations(Number(event.target.value))}
-                            aria-label={homeView === 'LIVE' ? 'Intermediate publish simulations' : 'Search simulations'}
-                            title={homeView === 'LIVE' ? 'Publish updated live analysis every N simulations during the same search job' : 'Search simulations'}
-                          />
+                          {isTreeSearchType && (
+                            <input
+                              type="number"
+                              min={1}
+                              max={LIVE_SEARCH_MAX_SIMULATIONS}
+                              value={searchSimulations}
+                              onChange={(event) => setSearchSimulations(Number(event.target.value))}
+                              aria-label={homeView === 'LIVE' ? 'Intermediate publish simulations' : 'Search simulations'}
+                              title={homeView === 'LIVE' ? 'Publish updated live analysis every N simulations during the same search job' : 'Search simulations'}
+                            />
+                          )}
+                          {searchType === 'alphabeta' && (
+                            <input
+                              type="number"
+                              min={1}
+                              max={64}
+                              value={alphabetaDepth}
+                              onChange={(event) => setAlphabetaDepth(Number(event.target.value))}
+                              aria-label="Alpha-Beta depth"
+                              title="Alpha-Beta search depth"
+                            />
+                          )}
+                          {searchType === 'forced_child' && (
+                            <input
+                              type="number"
+                              min={1}
+                              max={LIVE_SEARCH_MAX_SIMULATIONS}
+                              value={searchSimulations}
+                              onChange={(event) => setSearchSimulations(Number(event.target.value))}
+                              aria-label="Forced search simulations per action"
+                              title="Forced search simulations per action"
+                            />
+                          )}
                           <button
                             onClick={() => {
                               void startEngineThink();
                               setShowAnalysisSettings(false);
                             }}
-                            disabled={searchSimulations < 1 || uiStatus === 'WAITING_ENGINE'}
+                            disabled={!canRunCurrentSearch || uiStatus === 'WAITING_ENGINE'}
                           >
                             {homeView === 'LIVE' ? 'Analyze Turn' : 'Run Search'}
                           </button>
                         </div>
                       )}
-                      {homeView === 'LIVE' && (
+                      {homeView === 'LIVE' && isTreeSearchType && (
                         <div className="analysis-settings-section analysis-search-row">
                           <span>Limit</span>
                           <span>{LIVE_SEARCH_MAX_SIMULATIONS.toLocaleString()} sims</span>
@@ -3415,16 +3533,28 @@ const displayedP0EvalRef = useRef<number | null>(null);
                       )}
                       {homeView !== 'LIVE' && (
                         <div className="analysis-settings-section analysis-search-row">
-                          <span>Deep</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={LIVE_SEARCH_MAX_SIMULATIONS}
-                            value={deepAnalysisSimulations}
-                            onChange={(event) => setDeepAnalysisSimulations(Number(event.target.value))}
-                            aria-label="Deep analysis simulations"
-                            title="Deep analysis simulations per move"
-                          />
+                          <span>{deepAnalysisSettingsLabel}</span>
+                          {searchType === 'alphabeta' ? (
+                            <input
+                              type="number"
+                              min={1}
+                              max={64}
+                              value={alphabetaDepth}
+                              onChange={(event) => setAlphabetaDepth(Number(event.target.value))}
+                              aria-label="Deep analysis Alpha-Beta depth"
+                              title={deepAnalysisSettingsTitle}
+                            />
+                          ) : (
+                            <input
+                              type="number"
+                              min={1}
+                              max={LIVE_SEARCH_MAX_SIMULATIONS}
+                              value={deepAnalysisSimulations}
+                              onChange={(event) => setDeepAnalysisSimulations(Number(event.target.value))}
+                              aria-label={searchType === 'forced_child' ? 'Deep analysis forced search simulations per action' : 'Deep analysis simulations'}
+                              title={deepAnalysisSettingsTitle}
+                            />
+                          )}
                         </div>
                       )}
                       <div className="analysis-settings-section">
@@ -3476,9 +3606,11 @@ const displayedP0EvalRef = useRef<number | null>(null);
               {jobStatus?.error && <p className="error">Engine error: {jobStatus.error}</p>}
               {homeView === 'LIVE' && (
                 <p>
-                  Live mode runs one search job up to {LIVE_SEARCH_MAX_SIMULATIONS.toLocaleString()} sims and publishes updated analysis every {searchSimulations.toLocaleString()} sims.
+                  {isTreeSearchType
+                    ? `Live mode runs one search job up to ${LIVE_SEARCH_MAX_SIMULATIONS.toLocaleString()} sims and publishes updated analysis every ${searchSimulations.toLocaleString()} sims.`
+                    : `Live mode runs ${searchTypeLabel(searchType)} as a single-shot search for the current turn.`}
                   {jobStatus?.status === 'RUNNING' && ' Search in progress.'}
-                  {jobStatus?.result?.total_simulations != null && ` Current total: ${jobStatus.result.total_simulations}.`}
+                  {isTreeSearchType && jobStatus?.result?.total_simulations != null && ` Current total: ${jobStatus.result.total_simulations}.`}
                 </p>
               )}
               <div className="analysis-panel-body">

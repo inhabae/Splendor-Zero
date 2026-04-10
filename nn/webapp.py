@@ -23,6 +23,12 @@ from .checkpoints import load_checkpoint
 from .ismcts import ISMCTSConfig, run_ismcts
 from .mcts import MCTSConfig, run_mcts
 from .native_env import SplendorNativeEnv, StepState, list_standard_cards, list_standard_nobles
+from spendee.engine_policy import (
+    AlphaBetaConfig,
+    ForcedChildSearchConfig,
+    run_alphabeta_search,
+    run_forced_child_search,
+)
 from .selfplay_dataset import (
     list_sessions as list_selfplay_sessions,
     load_session_npz,
@@ -255,10 +261,12 @@ class JumpToSnapshotRequest(BaseModel):
 
 class EngineThinkRequest(BaseModel):
     num_simulations: int | None = Field(default=None, ge=1, le=500000)
-    search_type: Literal["mcts", "ismcts"] = "mcts"
+    search_type: Literal["mcts", "ismcts", "alphabeta", "forced_child"] = "mcts"
     continuous_until_cancel: bool = False
     max_total_simulations: int | None = Field(default=None, ge=1, le=500000)
     forced_root_action_idx: int | None = Field(default=None, ge=0, lt=ACTION_DIM)
+    alphabeta_depth: int | None = Field(default=None, ge=1, le=64)
+    forced_child_simulations_per_action: int | None = Field(default=None, ge=1, le=500000)
 
 
 class RevealCardRequest(BaseModel):
@@ -295,7 +303,7 @@ class RevealCardResponse(BaseModel):
 
 class EngineResultDTO(BaseModel):
     action_idx: int
-    search_type: Literal["mcts", "ismcts"] = "mcts"
+    search_type: Literal["mcts", "ismcts", "alphabeta", "forced_child"] = "mcts"
     action_details: list[ActionVizDTO] = Field(default_factory=list)
     model_action_details: list[ActionVizDTO] | None = None
     root_value: float | None = None
@@ -481,7 +489,7 @@ class EngineJob:
     root_value: float | None = None
     selected_action_q: float | None = None
     total_simulations: int = 0
-    search_type: Literal["mcts", "ismcts"] = "mcts"
+    search_type: Literal["mcts", "ismcts", "alphabeta", "forced_child"] = "mcts"
     forced_root_action_idx: int | None = None
 
 
@@ -2772,13 +2780,27 @@ class GameManager:
                 if req is not None and req.forced_root_action_idx is not None
                 else None
             )
+            alphabeta_depth = (
+                int(req.alphabeta_depth)
+                if req is not None and req.alphabeta_depth is not None
+                else 3
+            )
+            forced_child_simulations_per_action = (
+                int(req.forced_child_simulations_per_action)
+                if req is not None and req.forced_child_simulations_per_action is not None
+                else num_simulations
+            )
+            normalized_search_type = search_type if search_type in ("mcts", "ismcts", "alphabeta", "forced_child") else "mcts"
+
+            if continuous_until_cancel and normalized_search_type not in ("mcts", "ismcts"):
+                raise HTTPException(status_code=400, detail=f"{normalized_search_type} does not support continuous mode")
 
             job = EngineJob(
                 job_id=str(uuid.uuid4()),
                 game_id=game_id,
                 status="QUEUED",
                 cancel_event=threading.Event(),
-                search_type=search_type if search_type in ("mcts", "ismcts") else "mcts",
+                search_type=normalized_search_type,
                 forced_root_action_idx=forced_root_action_idx,
             )
             self._jobs[job.job_id] = job
@@ -2827,9 +2849,11 @@ class GameManager:
                             raise RuntimeError("Engine job cancelled")
 
                     search_budget = max_total_simulations if continuous_until_cancel else num_simulations
+                    total_simulations: int | None = None
+                    deterministic_q_values: np.ndarray | None = None
                     import time
                     start_time = time.time()
-                    if search_type == "mcts":
+                    if normalized_search_type == "mcts":
                         result = run_mcts(
                             search_env,
                             model,
@@ -2847,7 +2871,8 @@ class GameManager:
                             ),
                             rng=search_rng,
                         )
-                    else:
+                        total_simulations = int(search_budget)
+                    elif normalized_search_type == "ismcts":
                         result = run_ismcts(
                             search_env,
                             model,
@@ -2862,18 +2887,105 @@ class GameManager:
                             ),
                             rng=search_rng,
                         )
+                        total_simulations = int(search_budget)
+                    elif normalized_search_type == "alphabeta":
+                        if forced_root_action_idx is None:
+                            result = run_alphabeta_search(
+                                search_env,
+                                model,
+                                state=search_step,
+                                device=search_device,
+                                config=AlphaBetaConfig(depth=alphabeta_depth),
+                            )
+                            selected_action_idx = int(result.action_idx)
+                            selected_action_q = float(result.root_best_value_mean)
+                            policy = np.asarray(result.visit_probs, dtype=np.float32)
+                            deterministic_q_values = (
+                                np.asarray(result.q_values, dtype=np.float32)
+                                if result.q_values is not None
+                                else None
+                            )
+                        else:
+                            child_env = search_env.clone()
+                            child_step = child_env.step(int(forced_root_action_idx))
+                            same_player = int(child_step.current_player_id) == int(search_step.current_player_id)
+                            if child_step.is_terminal:
+                                raw_value = _terminal_value_for_player(int(child_step.winner), int(child_step.current_player_id))
+                            else:
+                                child_result = run_alphabeta_search(
+                                    child_env,
+                                    model,
+                                    state=child_step,
+                                    device=search_device,
+                                    config=AlphaBetaConfig(depth=alphabeta_depth),
+                                )
+                                raw_value = float(child_result.root_best_value_mean)
+                            selected_action_idx = int(forced_root_action_idx)
+                            selected_action_q = float(raw_value if same_player else -raw_value)
+                            policy = np.zeros((ACTION_DIM,), dtype=np.float32)
+                            policy[selected_action_idx] = 1.0
+                        result = None
+                    else:
+                        if forced_root_action_idx is None:
+                            result = run_forced_child_search(
+                                search_env,
+                                model,
+                                state=search_step,
+                                turns_taken=turns_taken,
+                                device=search_device,
+                                config=ForcedChildSearchConfig(
+                                    simulations_per_child=forced_child_simulations_per_action,
+                                ),
+                                rng=search_rng,
+                            )
+                            selected_action_idx = int(result.action_idx)
+                            selected_action_q = float(result.root_best_value_mean)
+                            policy = np.asarray(result.visit_probs, dtype=np.float32)
+                            deterministic_q_values = (
+                                np.asarray(result.q_values, dtype=np.float32)
+                                if result.q_values is not None
+                                else None
+                            )
+                        else:
+                            child_env = search_env.clone()
+                            child_step = child_env.step(int(forced_root_action_idx))
+                            same_player = int(child_step.current_player_id) == int(search_step.current_player_id)
+                            if child_step.is_terminal:
+                                raw_value = _terminal_value_for_player(int(child_step.winner), int(child_step.current_player_id))
+                            else:
+                                child_turns_taken = turns_taken if same_player else turns_taken + 1
+                                child_result = run_forced_child_search(
+                                    child_env,
+                                    model,
+                                    state=child_step,
+                                    turns_taken=child_turns_taken,
+                                    device=search_device,
+                                    config=ForcedChildSearchConfig(
+                                        simulations_per_child=forced_child_simulations_per_action,
+                                    ),
+                                    rng=search_rng,
+                                )
+                                raw_value = float(child_result.root_best_value_mean)
+                            selected_action_idx = int(forced_root_action_idx)
+                            selected_action_q = float(raw_value if same_player else -raw_value)
+                            policy = np.zeros((ACTION_DIM,), dtype=np.float32)
+                            policy[selected_action_idx] = 1.0
+                        result = None
                     elapsed = time.time() - start_time
-                    print(f"[{search_type.upper()}] Time: {elapsed:.3f}s | Budget: {search_budget} | "
-                          f"Requested: {result.search_slots_requested} | "
-                          f"Evaluated: {result.search_slots_evaluated} | "
-                          f"Dropped (pending): {result.search_slots_drop_pending_eval} | "
-                          f"Dropped (no action): {result.search_slots_drop_no_action}", flush=True)
+                    if result is not None:
+                        print(f"[{normalized_search_type.upper()}] Time: {elapsed:.3f}s | Budget: {search_budget} | "
+                              f"Requested: {result.search_slots_requested} | "
+                              f"Evaluated: {result.search_slots_evaluated} | "
+                              f"Dropped (pending): {result.search_slots_drop_pending_eval} | "
+                              f"Dropped (no action): {result.search_slots_drop_no_action}", flush=True)
+                        policy = np.asarray(result.visit_probs, dtype=np.float32)
+                        q_values = np.asarray(result.q_values, dtype=np.float32)
+                        selected_action_idx = int(_best_legal_action(search_step.mask, policy))
+                        selected_action_q = float(q_values[selected_action_idx])
+                    else:
+                        q_values = deterministic_q_values
+                        print(f"[{normalized_search_type.upper()}] Time: {elapsed:.3f}s", flush=True)
 
-                    policy = np.asarray(result.visit_probs, dtype=np.float32)
-                    q_values = np.asarray(result.q_values, dtype=np.float32)
-                    selected_action_idx = int(_best_legal_action(search_step.mask, policy))
-                    selected_action_q = float(q_values[selected_action_idx])
-                    total_simulations = int(search_budget)
                     search_board = _decode_board_state(
                         search_step,
                         turn_index=self._turn_index,
@@ -2893,7 +3005,6 @@ class GameManager:
 
                     if forced_root_action_idx is not None:
                         selected_action_idx = int(forced_root_action_idx)
-                        selected_action_q = float(q_values[forced_root_action_idx])
                         action_details = []
                     else:
                         model_eval = _evaluate_model_replay_state(
@@ -2921,10 +3032,10 @@ class GameManager:
                             raise RuntimeError("Engine job cancelled")
                         cur_job.action_idx = selected_action_idx
                         cur_job.action_details = action_details
-                        cur_job.root_value = float(result.root_best_value)
+                        cur_job.root_value = float(result.root_best_value) if result is not None else float(selected_action_q)
                         cur_job.selected_action_q = float(selected_action_q)
-                        cur_job.total_simulations = total_simulations
-                        cur_job.search_type = search_type if search_type in ("mcts", "ismcts") else "mcts"
+                        cur_job.total_simulations = 0 if total_simulations is None else total_simulations
+                        cur_job.search_type = normalized_search_type
                         cur_job.model_action_details = model_action_details
 
                     with self._lock:
