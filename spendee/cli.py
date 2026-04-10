@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-url", default=DEFAULT_SPENDEE_URL, help="Spendee page to open")
     parser.add_argument(
         "--search-type",
-        choices=("mcts", "ismcts"),
+        choices=("mcts", "ismcts", "alphabeta", "forced_child"),
         default="mcts",
         help="Search backend to use for move selection",
     )
@@ -36,6 +36,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--gpu-batching-enabled",
         action="store_true",
         help="Enable GPU batching for MCTS/ISMCTS (eval_batch_size=32 instead of 1)",
+    )
+    # --- Alpha-Beta options (only used when --search-type alphabeta) ---
+    parser.add_argument(
+        "--alphabeta-depth",
+        type=int,
+        default=3,
+        help="Search depth in plies for alpha-beta (default: 3)",
+    )
+    # --- Forced-child options (only used when --search-type forced_child) ---
+    parser.add_argument(
+        "--forced-child-simulations",
+        type=int,
+        default=2000,
+        help="MCTS simulations per child node for forced_child search (default: 2000)",
+    )
+    parser.add_argument(
+        "--forced-child-c-puct",
+        type=float,
+        default=1.25,
+        help="c_puct for forced_child MCTS (default: 1.25)",
     )
     parser.add_argument("--poll-interval-sec", type=float, default=0.5, help="Board polling interval")
     parser.add_argument("--stable-polls", type=int, default=2, help="Matching board snapshots required before acting")
@@ -100,6 +120,9 @@ async def _run_async(args: argparse.Namespace) -> None:
         num_simulations=int(args.num_simulations),
         determinization_samples=int(args.determinization_samples),
         gpu_batching_enabled=bool(args.gpu_batching_enabled),
+        alphabeta_depth=int(args.alphabeta_depth),
+        forced_child_simulations=int(args.forced_child_simulations),
+        forced_child_c_puct=float(args.forced_child_c_puct),
         poll_interval_sec=float(args.poll_interval_sec),
         stable_polls=int(args.stable_polls),
         dry_run=dry_run,

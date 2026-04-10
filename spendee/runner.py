@@ -11,7 +11,7 @@ from typing import Literal
 from nn.mcts import MCTSConfig
 
 from .catalog import SpendeeCatalog
-from .engine_policy import DeterminizedMCTSPolicy
+from .engine_policy import AlphaBetaConfig, DeterminizedMCTSPolicy, ForcedChildSearchConfig
 from .executor import SpendeeExecutor
 from .logging import BridgeArtifactLogger
 from .observer import ObservedBoardState, SpendeeObserver
@@ -61,10 +61,13 @@ class SpendeeBridgeConfig:
     user_data_dir: str
     checkpoint_path: str
     player_seat: str | None = None
-    search_type: Literal["mcts", "ismcts"] = "mcts"
+    search_type: Literal["mcts", "ismcts", "alphabeta", "forced_child"] = "mcts"
     num_simulations: int = 5000
     determinization_samples: int = 1
     gpu_batching_enabled: bool = False
+    alphabeta_depth: int = 3
+    forced_child_simulations: int = 2000
+    forced_child_c_puct: float = 1.25
     poll_interval_sec: float = 0.5
     stable_polls: int = 2
     stable_board_timeout_sec: float = 8.0
@@ -119,6 +122,12 @@ class SpendeeBridgeRunner:
             determinization_samples=config.determinization_samples,
             search_type=config.search_type,
             gpu_batching_enabled=config.gpu_batching_enabled,
+            alphabeta_config=AlphaBetaConfig(depth=config.alphabeta_depth),
+            forced_child_config=ForcedChildSearchConfig(
+                simulations_per_child=config.forced_child_simulations,
+                c_puct=config.forced_child_c_puct,
+                eval_batch_size=32 if config.gpu_batching_enabled else 1,
+            ),
         )
         self._last_action_idx: int | None = None
         self._seat_verified = False
