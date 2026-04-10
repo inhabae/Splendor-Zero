@@ -66,6 +66,7 @@ class SpendeeBridgeConfig:
     determinization_samples: int = 1
     gpu_batching_enabled: bool = False
     alphabeta_depth: int = 3
+    alphabeta_chance_samples: int = 4
     forced_child_simulations: int = 2000
     forced_child_c_puct: float = 1.25
     poll_interval_sec: float = 0.5
@@ -122,7 +123,10 @@ class SpendeeBridgeRunner:
             determinization_samples=config.determinization_samples,
             search_type=config.search_type,
             gpu_batching_enabled=config.gpu_batching_enabled,
-            alphabeta_config=AlphaBetaConfig(depth=config.alphabeta_depth),
+            alphabeta_config=AlphaBetaConfig(
+                depth=config.alphabeta_depth,
+                chance_node_samples=config.alphabeta_chance_samples,
+            ),
             forced_child_config=ForcedChildSearchConfig(
                 simulations_per_child=config.forced_child_simulations,
                 c_puct=config.forced_child_c_puct,

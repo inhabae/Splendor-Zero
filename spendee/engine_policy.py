@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import random
 from dataclasses import dataclass, field
 from typing import Literal
@@ -33,6 +34,10 @@ class AlphaBetaConfig:
     depth: int = 3
     """Maximum search depth (in plies). Same-player sub-turns count as a ply
     but do NOT switch perspective."""
+    chance_node_samples: int = 4
+    """Number of card draws to sample when a deck draw occurs mid-search.
+    Set to 1 to disable chance nodes (reverts to single-determinization behaviour).
+    Capped automatically at the number of cards remaining in the affected tier."""
 
 
 def _nn_evaluate(model, env: SplendorNativeEnv, state, device: str) -> tuple[np.ndarray, float]:
@@ -56,79 +61,190 @@ def _nn_evaluate(model, env: SplendorNativeEnv, state, device: str) -> tuple[np.
     return policy, value
 
 
-def _alphabeta(
-    env: SplendorNativeEnv,
-    state,
+
+# ---------------------------------------------------------------------------
+# Chance node helpers
+# ---------------------------------------------------------------------------
+
+def _tier_for_action(action_idx: int) -> int | None:
+    """Return the deck tier a draw event is associated with, or None if the
+    action cannot trigger a deck draw."""
+    if 0 <= action_idx <= 11:           # buy face-up: tier = row + 1
+        return action_idx // 4 + 1
+    if 15 <= action_idx <= 26:          # reserve face-up: same layout
+        return (action_idx - 15) // 4 + 1
+    if 27 <= action_idx <= 29:          # reserve from deck: explicit tier
+        return action_idx - 27 + 1
+    return None
+
+
+def _slot_for_action(action_idx: int) -> int | None:
+    """Return the face-up slot index (0–3) for buy/reserve-faceup actions."""
+    if 0 <= action_idx <= 11:
+        return action_idx % 4
+    if 15 <= action_idx <= 26:
+        return (action_idx - 15) % 4
+    return None
+
+
+def _find_drawn_card(
+    pre_deck: list[int],
+    post_deck: list[int],
+) -> int | None:
+    """Given the deck contents before and after a step, return the card id
+    that was drawn (i.e. present in pre but absent in post), or None."""
+    pre_set = set(pre_deck)
+    post_set = set(post_deck)
+    diff = pre_set - post_set
+    if len(diff) == 1:
+        return next(iter(diff))
+    return None
+
+
+def _build_chance_outcomes(
+    pre_export: dict,
+    post_export: dict,
+    action_idx: int,
+    actor_player_index: int,
+    *,
+    samples: int,
+    rng: random.Random,
+) -> list[dict] | None:
+    """Return a list of modified post-step exported states, each representing
+    one sampled deck draw outcome.  Returns None if no chance event occurred
+    (deck was empty, only one card possible, or action doesn't draw).
+
+    Each returned dict is a ready-to-load payload for env.load_state().
+    """
+    tier = _tier_for_action(action_idx)
+    if tier is None:
+        return None
+
+    pre_deck: list[int] = list(pre_export.get("deck_card_ids_by_tier", [[], [], []])[tier - 1])
+    post_deck: list[int] = list(post_export.get("deck_card_ids_by_tier", [[], [], []])[tier - 1])
+
+    # No draw happened (deck was already empty before the action)
+    if len(pre_deck) == len(post_deck):
+        return None
+
+    drawn_card = _find_drawn_card(pre_deck, post_deck)
+    if drawn_card is None:
+        return None
+
+    # All cards that could have been drawn: the pre-deck contents
+    possible_cards: list[int] = list(pre_deck)
+    if len(possible_cards) <= 1:
+        # Only one outcome — no branching needed
+        return None
+
+    n = min(int(samples), len(possible_cards))
+    sampled_cards: list[int] = rng.sample(possible_cards, n)
+
+    slot = _slot_for_action(action_idx)
+    is_reserve_deck = 27 <= action_idx <= 29
+
+    outcomes: list[dict] = []
+    for card_id in sampled_cards:
+        state = copy.deepcopy(post_export)
+
+        # Replace drawn_card with card_id in the deck (deck shrinks by 1 regardless,
+        # but we need to represent the correct remaining deck contents)
+        new_deck = [c for c in pre_deck if c != card_id]
+        state["deck_card_ids_by_tier"][tier - 1] = new_deck
+
+        if is_reserve_deck:
+            # The drawn card goes into the acting player's reserved hand.
+            # Find it in the reserved list and swap it.
+            players = state.get("players", [])
+            if actor_player_index < len(players):
+                player = players[actor_player_index]
+                reserved = player.get("reserved", [])
+                for entry in reserved:
+                    if entry.get("card_id") == drawn_card:
+                        entry["card_id"] = card_id
+                        break
+        else:
+            # The drawn card appears face-up in the vacated slot.
+            faceup = state.get("faceup_card_ids", [[], [], [], []])
+            if tier - 1 < len(faceup) and slot is not None and slot < len(faceup[tier - 1]):
+                row = faceup[tier - 1]
+                row[slot] = card_id
+
+        outcomes.append(state)
+
+    return outcomes
+
+
+def _alphabeta_chance(
+    parent_env: "SplendorNativeEnv",
+    post_export: dict,
+    pre_export: dict,
+    action_idx: int,
+    actor_player_index: int,
     depth: int,
     alpha: float,
     beta: float,
     model,
     device: str,
+    root_player: int,
+    config: "AlphaBetaConfig",
+    rng: random.Random,
 ) -> float:
-    """Negamax alpha-beta.
+    """Evaluate a chance node by averaging over sampled deck-draw outcomes.
 
-    Returns the value from the perspective of the player-to-move at this node.
-
-    Handles same-player sub-turns (gem return, noble choice) correctly:
-    when current_player does not change after applying a move, we do NOT negate.
+    If no chance event is detected, falls through immediately to
+    _alphabeta_with_clone on the already-stepped state.
     """
-    if state.is_terminal:
-        # Terminal: winner == current_player_id => +1, else -1, draw => 0
-        w = state.winner
-        cp = state.current_player_id
-        if w == -1:
-            return 0.0
-        return 1.0 if w == cp else -1.0
+    outcomes = _build_chance_outcomes(
+        pre_export,
+        post_export,
+        action_idx,
+        actor_player_index,
+        samples=config.chance_node_samples,
+        rng=rng,
+    )
 
-    if depth == 0:
-        _, value = _nn_evaluate(model, env, state, device)
-        return value
+    if not outcomes:
+        # No chance event — evaluate the single post-step state directly.
+        child_env = parent_env.clone()
+        child_state = child_env.load_state(post_export)
+        return _alphabeta_with_clone(
+            child_env, child_state, depth, alpha, beta, model, device,
+            root_player=root_player, config=config, rng=rng,
+        )
 
-    mask = np.asarray(state.mask, dtype=bool)
-    legal_actions = np.where(mask)[0].tolist()
-    if not legal_actions:
-        return 0.0
+    # Chance node: average over sampled outcomes (no pruning at this level).
+    total = 0.0
+    for outcome_export in outcomes:
+        child_env = parent_env.clone()
+        child_state = child_env.load_state(outcome_export)
+        # Depth is NOT decremented at the chance node itself.
+        v = _alphabeta_with_clone(
+            child_env, child_state, depth, alpha, beta, model, device,
+            root_player=root_player, config=config, rng=rng,
+        )
+        total += v
 
-    # Use NN policy to order moves (higher prior = try first => more cutoffs)
-    policy, _ = _nn_evaluate(model, env, state, device)
-    legal_actions.sort(key=lambda a: -policy[a])
-
-    current_player = state.current_player_id
-    best = -2.0  # below any valid value
-
-    for action in legal_actions:
-        child_state = env.step(action)  # advances the env in-place
-        same_player = (child_state.current_player_id == current_player)
-
-        if same_player:
-            # Same player's turn continues — no perspective flip
-            child_value = _alphabeta(env, child_state, depth - 1, alpha, beta, model, device)
-        else:
-            # Opponent to move — flip perspective
-            child_value = -_alphabeta(env, child_state, depth - 1, -beta, -alpha, model, device)
-
-        # Undo: restore env to parent state by reloading (env.clone was used outside)
-        # NOTE: we use a cloned env per call level — see run_alphabeta_search below
-
-        best = max(best, child_value)
-        alpha = max(alpha, best)
-        if alpha >= beta:
-            break  # beta cutoff
-
-    return best
+    return total / len(outcomes)
 
 
 def _alphabeta_with_clone(
-    parent_env: SplendorNativeEnv,
+    parent_env: "SplendorNativeEnv",
     parent_state,
     depth: int,
     alpha: float,
     beta: float,
     model,
     device: str,
+    *,
+    root_player: int,
+    config: "AlphaBetaConfig",
+    rng: random.Random,
 ) -> float:
-    """Wrapper that clones the env before each recursive call so moves are
-    automatically 'undone' when the clone goes out of scope."""
+    """Negamax alpha-beta with clone-based undo and explicit chance nodes.
+
+    Values are always from the perspective of the player-to-move at this node.
+    """
     if parent_state.is_terminal:
         w = parent_state.winner
         cp = parent_state.current_player_id
@@ -149,20 +265,32 @@ def _alphabeta_with_clone(
     legal_actions.sort(key=lambda a: -policy[a])
 
     current_player = parent_state.current_player_id
+    pre_export = parent_env.export_state()
     best = -2.0
 
     for action in legal_actions:
-        child_env = parent_env.clone()
-        child_state = child_env.step(action)
+        # Step in a clone to get the post-action state
+        step_env = parent_env.clone()
+        child_state = step_env.step(action)
+        post_export = step_env.export_state()
+
         same_player = (child_state.current_player_id == current_player)
 
+        # Determine whether this action may have triggered a deck draw
+        # and route through the chance node evaluator.
         if same_player:
-            child_value = _alphabeta_with_clone(
-                child_env, child_state, depth - 1, alpha, beta, model, device
+            child_value = _alphabeta_chance(
+                step_env, post_export, pre_export, action,
+                current_player, depth - 1,
+                alpha, beta, model, device,
+                root_player=root_player, config=config, rng=rng,
             )
         else:
-            child_value = -_alphabeta_with_clone(
-                child_env, child_state, depth - 1, -beta, -alpha, model, device
+            child_value = -_alphabeta_chance(
+                step_env, post_export, pre_export, action,
+                current_player, depth - 1,
+                -beta, -alpha, model, device,
+                root_player=root_player, config=config, rng=rng,
             )
 
         best = max(best, child_value)
@@ -180,9 +308,11 @@ def run_alphabeta_search(
     *,
     device: str = "cpu",
     config: AlphaBetaConfig | None = None,
+    rng: random.Random | None = None,
 ) -> DeterminizedPolicyResult:
     """Run alpha-beta search from the root and return the best action."""
     cfg = config or AlphaBetaConfig()
+    py_rng = rng or random.Random()
     if bool(getattr(model, "training", False)):
         model.eval()
 
@@ -196,6 +326,7 @@ def run_alphabeta_search(
     legal_actions.sort(key=lambda a: -policy[a])
 
     current_player = state.current_player_id
+    pre_export = env.export_state()
     best_action = legal_actions[0]
     best_value = -2.0
     alpha = -2.0
@@ -204,17 +335,24 @@ def run_alphabeta_search(
     visit_probs = np.zeros(len(mask), dtype=np.float32)
 
     for action in legal_actions:
-        child_env = env.clone()
-        child_state = child_env.step(action)
+        step_env = env.clone()
+        child_state = step_env.step(action)
+        post_export = step_env.export_state()
         same_player = (child_state.current_player_id == current_player)
 
         if same_player:
-            child_value = _alphabeta_with_clone(
-                child_env, child_state, cfg.depth - 1, alpha, beta, model, device
+            child_value = _alphabeta_chance(
+                step_env, post_export, pre_export, action,
+                current_player, cfg.depth - 1,
+                alpha, beta, model, device,
+                root_player=current_player, config=cfg, rng=py_rng,
             )
         else:
-            child_value = -_alphabeta_with_clone(
-                child_env, child_state, cfg.depth - 1, -beta, -alpha, model, device
+            child_value = -_alphabeta_chance(
+                step_env, post_export, pre_export, action,
+                current_player, cfg.depth - 1,
+                -beta, -alpha, model, device,
+                root_player=current_player, config=cfg, rng=py_rng,
             )
 
         if child_value > best_value:
@@ -403,6 +541,7 @@ class DeterminizedMCTSPolicy:
                 state,
                 device=self.device,
                 config=self.alphabeta_config,
+                rng=rng,
             )
 
         if self.search_type == "forced_child":

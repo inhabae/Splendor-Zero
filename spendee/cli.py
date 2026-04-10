@@ -44,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Search depth in plies for alpha-beta (default: 3)",
     )
+    parser.add_argument(
+        "--alphabeta-chance-samples",
+        type=int,
+        default=4,
+        help="Deck-draw outcomes to sample at chance nodes during alpha-beta (default: 4; set to 1 to disable)",
+    )
     # --- Forced-child options (only used when --search-type forced_child) ---
     parser.add_argument(
         "--forced-child-simulations",
@@ -121,6 +127,7 @@ async def _run_async(args: argparse.Namespace) -> None:
         determinization_samples=int(args.determinization_samples),
         gpu_batching_enabled=bool(args.gpu_batching_enabled),
         alphabeta_depth=int(args.alphabeta_depth),
+        alphabeta_chance_samples=int(args.alphabeta_chance_samples),
         forced_child_simulations=int(args.forced_child_simulations),
         forced_child_c_puct=float(args.forced_child_c_puct),
         poll_interval_sec=float(args.poll_interval_sec),
