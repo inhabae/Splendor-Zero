@@ -56,7 +56,6 @@ CHECKPOINT_DIR = REPO_ROOT / "nn_artifacts" / "checkpoints"
 SELFPLAY_DIR = REPO_ROOT / "nn_artifacts" / "selfplay"
 WEB_DIST_DIR = REPO_ROOT / "webui" / "dist"
 SPENDEE_LIVE_SAVE_PATH = REPO_ROOT / "nn_artifacts" / "spendee_bridge" / "webui_save.json"
-ENGINE_JOB_CANCEL_CHECK_CHUNK = 1_000
 _STANDARD_CARD_TIER_BY_ID = {
     int(card["id"]): int(card["tier"])
     for card in list_standard_cards()
@@ -2813,143 +2812,118 @@ class GameManager:
                     cur_job.status = "RUNNING"
 
                 try:
-                    accumulated_visits = np.zeros_like(search_step.mask, dtype=np.float64)
-                    accumulated_weighted_q = np.zeros_like(search_step.mask, dtype=np.float64)
-                    latest_q_values = np.zeros_like(search_step.mask, dtype=np.float32)
-                    accumulated_root_value = 0.0
-                    total_simulations = 0
+                    with self._lock:
+                        cur_job = self._jobs.get(job.job_id)
+                        if cur_job is None:
+                            raise RuntimeError("Engine job disappeared")
+                        if self._active_job_id != job.job_id:
+                            cur_job.cancel_event.set()
+                            cur_job.status = "CANCELLED"
+                            raise RuntimeError("Engine job superseded")
+                        if cur_job.cancel_event.is_set():
+                            cur_job.status = "CANCELLED"
+                            raise RuntimeError("Engine job cancelled")
 
-                    while True:
-                        with self._lock:
-                            cur_job = self._jobs.get(job.job_id)
-                            if cur_job is None:
-                                raise RuntimeError("Engine job disappeared")
-                            if self._active_job_id != job.job_id:
-                                cur_job.cancel_event.set()
-                                cur_job.status = "CANCELLED"
-                                raise RuntimeError("Engine job superseded")
-                            if cur_job.cancel_event.is_set():
-                                cur_job.status = "CANCELLED"
-                                raise RuntimeError("Engine job cancelled")
-
-                        remaining = max_total_simulations - total_simulations
-                        if remaining <= 0:
-                            break
-                        chunk_simulations = min(num_simulations, remaining, ENGINE_JOB_CANCEL_CHECK_CHUNK)
-                        import time
-                        start_time = time.time()
-                        if search_type == "mcts":
-                            result = run_mcts(
-                                search_env,
-                                model,
-                                state=search_step,
-                                turns_taken=turns_taken,
-                                device=search_device,
-                                config=MCTSConfig(
-                                    num_simulations=chunk_simulations,
-                                    c_puct=1.25,
+                    search_budget = max_total_simulations if continuous_until_cancel else num_simulations
+                    import time
+                    start_time = time.time()
+                    if search_type == "mcts":
+                        result = run_mcts(
+                            search_env,
+                            model,
+                            state=search_step,
+                            turns_taken=turns_taken,
+                            device=search_device,
+                            config=MCTSConfig(
+                                num_simulations=search_budget,
+                                c_puct=1.0,
                                 temperature_moves=0,
                                 temperature=0.0,
                                 root_dirichlet_noise=False,
+                                use_forced_playouts=False,
                                 forced_root_action_idx=forced_root_action_idx,
                             ),
-                                rng=search_rng,
-                            )
-                        else:
-                            result = run_ismcts(
-                                search_env,
-                                model,
-                                state=search_step,
-                                turns_taken=turns_taken,
-                                device=search_device,
-                                config=ISMCTSConfig(
-                                    num_simulations=chunk_simulations,
-                                    c_puct=1.25,
-                                    eval_batch_size=1,
-                                    forced_root_action_idx=forced_root_action_idx,
-                                ),
-                                rng=search_rng,
-                            )
-                        elapsed = time.time() - start_time
-                        print(f"[{search_type.upper()}] Time: {elapsed:.3f}s | Budget: {chunk_simulations} | "
-                              f"Requested: {result.search_slots_requested} | "
-                              f"Evaluated: {result.search_slots_evaluated} | "
-                              f"Dropped (pending): {result.search_slots_drop_pending_eval} | "
-                              f"Dropped (no action): {result.search_slots_drop_no_action}", flush=True)
-
-                        weight = float(chunk_simulations)
-                        estimated_visits = np.asarray(result.visit_probs, dtype=np.float64) * weight
-                        accumulated_visits += estimated_visits
-                        accumulated_weighted_q += np.asarray(result.q_values, dtype=np.float64) * estimated_visits
-                        latest_q_values = np.asarray(result.q_values, dtype=np.float32)
-                        total_simulations += int(weight)
-                        accumulated_root_value += float(result.root_best_value) * weight
-
-                        aggregated_policy = accumulated_visits.astype(np.float32, copy=False)
-                        policy_sum = float(aggregated_policy.sum())
-                        if policy_sum > 0.0:
-                            aggregated_policy = aggregated_policy / policy_sum
-                        aggregated_q_values = latest_q_values.copy()
-                        visited = accumulated_visits > 0.0
-                        aggregated_q_values[visited] = (
-                            accumulated_weighted_q[visited] / accumulated_visits[visited]
-                        ).astype(np.float32, copy=False)
-                        aggregated_action_idx = _best_legal_action(search_step.mask, aggregated_policy)
-                        aggregated_root = accumulated_root_value / float(total_simulations)
-                        selected_action_q = float(aggregated_q_values[aggregated_action_idx])
-                        selected_action_idx = int(aggregated_action_idx)
-                        search_board = _decode_board_state(
-                            search_step,
-                            turn_index=self._turn_index,
-                            player_seat=_seat_str(search_step.current_player_id),
-                            pending_reveals=self._pending_reveals,
-                            hidden_deck_card_ids_by_tier=env.hidden_deck_card_ids_by_tier(),
+                            rng=search_rng,
                         )
-                        action_details = _action_viz_rows(
+                    else:
+                        result = run_ismcts(
+                            search_env,
+                            model,
+                            state=search_step,
+                            turns_taken=turns_taken,
+                            device=search_device,
+                            config=ISMCTSConfig(
+                                num_simulations=search_budget,
+                                c_puct=1.0,
+                                eval_batch_size=1,
+                                forced_root_action_idx=forced_root_action_idx,
+                            ),
+                            rng=search_rng,
+                        )
+                    elapsed = time.time() - start_time
+                    print(f"[{search_type.upper()}] Time: {elapsed:.3f}s | Budget: {search_budget} | "
+                          f"Requested: {result.search_slots_requested} | "
+                          f"Evaluated: {result.search_slots_evaluated} | "
+                          f"Dropped (pending): {result.search_slots_drop_pending_eval} | "
+                          f"Dropped (no action): {result.search_slots_drop_no_action}", flush=True)
+
+                    policy = np.asarray(result.visit_probs, dtype=np.float32)
+                    q_values = np.asarray(result.q_values, dtype=np.float32)
+                    selected_action_idx = int(_best_legal_action(search_step.mask, policy))
+                    selected_action_q = float(q_values[selected_action_idx])
+                    total_simulations = int(search_budget)
+                    search_board = _decode_board_state(
+                        search_step,
+                        turn_index=self._turn_index,
+                        player_seat=_seat_str(search_step.current_player_id),
+                        pending_reveals=self._pending_reveals,
+                        hidden_deck_card_ids_by_tier=env.hidden_deck_card_ids_by_tier(),
+                    )
+                    action_details = _action_viz_rows(
+                        search_step.mask,
+                        policy,
+                        selected_action_idx,
+                        search_board,
+                        _seat_str(search_step.current_player_id),
+                        q_values,
+                    )
+                    model_action_details = None
+
+                    if forced_root_action_idx is not None:
+                        selected_action_idx = int(forced_root_action_idx)
+                        selected_action_q = float(q_values[forced_root_action_idx])
+                        action_details = []
+                    else:
+                        model_eval = _evaluate_model_replay_state(
+                            {"checkpoint_path": str(config.checkpoint_path)},
+                            search_step.state,
                             search_step.mask,
-                            aggregated_policy,
-                            int(aggregated_action_idx),
-                            search_board,
-                            _seat_str(search_step.current_player_id),
-                            aggregated_q_values,
+                            selected_action_idx,
                         )
-                        model_action_details = None
-
-                        if forced_root_action_idx is not None:
-                            selected_action_idx = int(forced_root_action_idx)
-                            selected_action_q = float(aggregated_q_values[forced_root_action_idx])
-                            action_details = []
-                        else:
-                            model_eval = _evaluate_model_replay_state(
-                                {"checkpoint_path": str(config.checkpoint_path)},
-                                search_step.state,
+                        if model_eval is not None:
+                            model_policy, _ = model_eval
+                            model_action_details = _action_viz_rows(
                                 search_step.mask,
-                                int(aggregated_action_idx),
+                                model_policy,
+                                selected_action_idx,
+                                search_board,
+                                _seat_str(search_step.current_player_id),
                             )
-                            if model_eval is not None:
-                                model_policy, _ = model_eval
-                                model_action_details = _action_viz_rows(
-                                    search_step.mask,
-                                    model_policy,
-                                    int(aggregated_action_idx),
-                                    search_board,
-                                    _seat_str(search_step.current_player_id),
-                                )
 
-                        with self._lock:
-                            cur_job = self._jobs.get(job.job_id)
-                            if cur_job is None:
-                                raise RuntimeError("Engine job disappeared")
-                            if cur_job.cancel_event.is_set():
-                                cur_job.status = "CANCELLED"
-                                raise RuntimeError("Engine job cancelled")
-                            cur_job.action_idx = selected_action_idx
-                            cur_job.action_details = action_details
-                            cur_job.root_value = float(aggregated_root)
-                            cur_job.selected_action_q = float(selected_action_q)
-                            cur_job.total_simulations = int(total_simulations)
-                            cur_job.search_type = search_type if search_type in ("mcts", "ismcts") else "mcts"
-                            cur_job.model_action_details = model_action_details
+                    with self._lock:
+                        cur_job = self._jobs.get(job.job_id)
+                        if cur_job is None:
+                            raise RuntimeError("Engine job disappeared")
+                        if cur_job.cancel_event.is_set():
+                            cur_job.status = "CANCELLED"
+                            raise RuntimeError("Engine job cancelled")
+                        cur_job.action_idx = selected_action_idx
+                        cur_job.action_details = action_details
+                        cur_job.root_value = float(result.root_best_value)
+                        cur_job.selected_action_q = float(selected_action_q)
+                        cur_job.total_simulations = total_simulations
+                        cur_job.search_type = search_type if search_type in ("mcts", "ismcts") else "mcts"
+                        cur_job.model_action_details = model_action_details
 
                     with self._lock:
                         cur_job = self._jobs.get(job.job_id)

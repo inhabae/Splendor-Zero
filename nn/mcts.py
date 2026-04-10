@@ -30,6 +30,7 @@ class MCTSConfig:
 class MCTSResult:
     chosen_action_idx: int
     visit_probs: np.ndarray  # (69,) float32
+    raw_visit_probs: np.ndarray  # Back-compat alias for callers expecting unpruned root visits.
     q_values: np.ndarray  # (69,) float32
     root_best_value: float
     search_slots_requested: int
@@ -141,6 +142,7 @@ def run_mcts(
     return MCTSResult(
         chosen_action_idx=int(native_result.chosen_action_idx),
         visit_probs=visit_probs,
+        raw_visit_probs=np.asarray(getattr(native_result, "raw_visit_probs", visit_probs), dtype=np.float32).copy(),
         q_values=q_values,
         root_best_value=float(native_result.root_best_value),
         search_slots_requested=int(native_result.search_slots_requested),
