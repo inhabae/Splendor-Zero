@@ -350,6 +350,7 @@ def run_alphabeta_search(
     beta = 2.0
 
     visit_probs = np.zeros(len(mask), dtype=np.float32)
+    q_values = np.full(len(mask), np.nan, dtype=np.float32)
 
     for action in legal_actions:
         step_env = env.clone()
@@ -372,6 +373,7 @@ def run_alphabeta_search(
                 root_player=current_player, config=cfg, rng=py_rng,
             )
 
+        q_values[action] = np.float32(child_value)
         if child_value > best_value:
             best_value = child_value
             best_action = action
@@ -384,7 +386,7 @@ def run_alphabeta_search(
         visit_probs=visit_probs,
         root_best_value_mean=best_value,
         num_determinizations=1,
-        q_values=None,
+        q_values=q_values,
     )
 
 

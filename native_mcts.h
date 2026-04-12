@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -17,9 +18,15 @@ struct NativeMCTSResult {
     int search_slots_evaluated = 0;
     int search_slots_drop_pending_eval = 0;
     int search_slots_drop_no_action = 0;
+    int max_leaf_depth = 0;
+    int max_resolved_depth = 0;
+    std::vector<int> leaf_depth_histogram{};
+    std::vector<int> resolved_depth_histogram{};
 
     pybind11::array_t<float> visit_probs_array() const;
     pybind11::array_t<float> q_values_array() const;
+    pybind11::array_t<int> leaf_depth_histogram_array() const;
+    pybind11::array_t<int> resolved_depth_histogram_array() const;
 };
 
 // Note: search performs per-simulation root determinization by shuffling hidden

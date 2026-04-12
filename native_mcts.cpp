@@ -59,6 +59,7 @@ struct PathStep {
 
 struct PendingLeafEval {
     int node_index = -1;
+    GameState state_snapshot{};
     std::array<float, kStateDim> state{};
     std::array<std::uint8_t, kActionDim> mask{};
     std::vector<PathStep> path;
@@ -66,6 +67,8 @@ struct PendingLeafEval {
 
 struct ReadyBackup {
     float value = 0.0f;
+    int tree_depth = -1;
+    int resolved_depth = -1;
     std::vector<PathStep> path;
 };
 
@@ -117,6 +120,50 @@ struct ISMCTSWorkerResult {
 };
 
 NodeMetadata build_node_metadata(const GameState& state);
+
+bool is_modal_subturn_state(const GameState& state) {
+    return state.is_return_phase || state.is_noble_choice_phase;
+}
+
+int select_max_policy_legal_action(
+    const std::array<float, kActionDim>& policy_scores,
+    const std::array<std::uint8_t, kActionDim>& legal_mask
+) {
+    int best_action = -1;
+    float best_score = -std::numeric_limits<float>::infinity();
+    for (int a = 0; a < kActionDim; ++a) {
+        if (legal_mask[static_cast<std::size_t>(a)] == 0) {
+            continue;
+        }
+        const float score = policy_scores[static_cast<std::size_t>(a)];
+        if (!std::isfinite(static_cast<double>(score))) {
+            continue;
+        }
+        if (best_action < 0 || score > best_score) {
+            best_action = a;
+            best_score = score;
+        }
+    }
+    if (best_action >= 0) {
+        return best_action;
+    }
+    for (int a = 0; a < kActionDim; ++a) {
+        if (legal_mask[static_cast<std::size_t>(a)] != 0) {
+            return a;
+        }
+    }
+    return -1;
+}
+
+void record_depth_histogram(std::vector<int>& hist, int depth) {
+    if (depth < 0) {
+        return;
+    }
+    if (static_cast<std::size_t>(depth) >= hist.size()) {
+        hist.resize(static_cast<std::size_t>(depth) + 1U, 0);
+    }
+    hist[static_cast<std::size_t>(depth)] += 1;
+}
 
 std::vector<int> sorted_legal_action_indices(const GameState& state) {
     const auto legal_moves = findAllValidMoves(state);
@@ -1274,6 +1321,30 @@ pybind11::array_t<float> NativeMCTSResult::q_values_array() const {
     return arr;
 }
 
+pybind11::array_t<int> NativeMCTSResult::leaf_depth_histogram_array() const {
+    pybind11::array_t<int> arr(static_cast<pybind11::ssize_t>(leaf_depth_histogram.size()));
+    if (!leaf_depth_histogram.empty()) {
+        std::memcpy(
+            arr.mutable_data(),
+            leaf_depth_histogram.data(),
+            sizeof(int) * leaf_depth_histogram.size()
+        );
+    }
+    return arr;
+}
+
+pybind11::array_t<int> NativeMCTSResult::resolved_depth_histogram_array() const {
+    pybind11::array_t<int> arr(static_cast<pybind11::ssize_t>(resolved_depth_histogram.size()));
+    if (!resolved_depth_histogram.empty()) {
+        std::memcpy(
+            arr.mutable_data(),
+            resolved_depth_histogram.data(),
+            sizeof(int) * resolved_depth_histogram.size()
+        );
+    }
+    return arr;
+}
+
 NativeMCTSResult run_native_mcts(
     const GameState& root_state,
     pybind11::function evaluator,
@@ -1339,111 +1410,226 @@ NativeMCTSResult run_native_mcts(
     bool root_noise_applied = false;
     int completed = 0;
     const int tree_worker_limit = resolve_tree_worker_limit();
+    std::vector<int> leaf_depth_histogram;
+    std::vector<int> resolved_depth_histogram;
+    int max_leaf_depth = 0;
+    int max_resolved_depth = 0;
 
     auto evaluate_pending = [&](std::vector<PendingLeafEval>& pending, std::vector<ReadyBackup>& backups) {
         if (pending.empty()) {
             return;
         }
 
-        const pybind11::ssize_t batch = static_cast<pybind11::ssize_t>(pending.size());
-        pybind11::array_t<float> states({batch, static_cast<pybind11::ssize_t>(kStateDim)});
-        pybind11::array_t<bool> masks({batch, static_cast<pybind11::ssize_t>(kActionDim)});
-        auto masks_view = masks.mutable_unchecked<2>();
-        for (pybind11::ssize_t i = 0; i < batch; ++i) {
-            const PendingLeafEval& req = pending[static_cast<std::size_t>(i)];
-            float* state_row = states.mutable_data(i, 0);
-            std::memcpy(state_row, req.state.data(), sizeof(float) * static_cast<std::size_t>(kStateDim));
-            for (int j = 0; j < kActionDim; ++j) {
-                masks_view(i, j) = (req.mask[static_cast<std::size_t>(j)] != 0);
+        auto evaluate_batch = [&](const std::vector<std::array<float, kStateDim>>& states_in,
+                                  const std::vector<std::array<std::uint8_t, kActionDim>>& masks_in) {
+            const pybind11::ssize_t batch = static_cast<pybind11::ssize_t>(states_in.size());
+            pybind11::array_t<float> states({batch, static_cast<pybind11::ssize_t>(kStateDim)});
+            pybind11::array_t<bool> masks({batch, static_cast<pybind11::ssize_t>(kActionDim)});
+            auto masks_view = masks.mutable_unchecked<2>();
+            for (pybind11::ssize_t i = 0; i < batch; ++i) {
+                float* state_row = states.mutable_data(i, 0);
+                std::memcpy(
+                    state_row,
+                    states_in[static_cast<std::size_t>(i)].data(),
+                    sizeof(float) * static_cast<std::size_t>(kStateDim)
+                );
+                for (int j = 0; j < kActionDim; ++j) {
+                    masks_view(i, j) = (masks_in[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] != 0);
+                }
             }
-        }
 
-        pybind11::object out_obj = evaluator(states, masks);
-        pybind11::tuple out = out_obj.cast<pybind11::tuple>();
-        if (out.size() != 2) {
-            throw std::runtime_error("MCTS evaluator must return (priors, values)");
-        }
+            pybind11::object out_obj = evaluator(states, masks);
+            pybind11::tuple out = out_obj.cast<pybind11::tuple>();
+            if (out.size() != 2) {
+                throw std::runtime_error("MCTS evaluator must return (priors, values)");
+            }
 
-        auto priors_arr =
-            pybind11::array_t<float, pybind11::array::c_style | pybind11::array::forcecast>::ensure(out[0]);
-        auto values_arr =
-            pybind11::array_t<float, pybind11::array::c_style | pybind11::array::forcecast>::ensure(out[1]);
-        if (!priors_arr || !values_arr) {
-            throw std::runtime_error("MCTS evaluator outputs must be float arrays");
-        }
-        if (priors_arr.ndim() != 2 ||
-            priors_arr.shape(0) != batch ||
-            priors_arr.shape(1) != static_cast<pybind11::ssize_t>(kActionDim)) {
-            throw std::runtime_error("MCTS evaluator priors must have shape (B, ACTION_DIM)");
-        }
-        if (values_arr.ndim() != 1 || values_arr.shape(0) != batch) {
-            throw std::runtime_error("MCTS evaluator values must have shape (B,)");
-        }
+            auto priors_arr =
+                pybind11::array_t<float, pybind11::array::c_style | pybind11::array::forcecast>::ensure(out[0]);
+            auto values_arr =
+                pybind11::array_t<float, pybind11::array::c_style | pybind11::array::forcecast>::ensure(out[1]);
+            if (!priors_arr || !values_arr) {
+                throw std::runtime_error("MCTS evaluator outputs must be float arrays");
+            }
+            if (priors_arr.ndim() != 2 ||
+                priors_arr.shape(0) != batch ||
+                priors_arr.shape(1) != static_cast<pybind11::ssize_t>(kActionDim)) {
+                throw std::runtime_error("MCTS evaluator priors must have shape (B, ACTION_DIM)");
+            }
+            if (values_arr.ndim() != 1 || values_arr.shape(0) != batch) {
+                throw std::runtime_error("MCTS evaluator values must have shape (B,)");
+            }
+            return std::make_pair(priors_arr, values_arr);
+        };
 
-        auto priors_view = priors_arr.unchecked<2>();
-        auto values_view = values_arr.unchecked<1>();
+        auto assign_priors_from_scores =
+            [&](MCTSNode& node,
+                const std::array<std::uint8_t, kActionDim>& legal_mask,
+                const pybind11::detail::unchecked_reference<float, 2>& priors_view,
+                pybind11::ssize_t row_idx) {
+                int legal_count = 0;
+                bool has_finite_legal_score = false;
+                float max_score = -std::numeric_limits<float>::infinity();
+                for (int a = 0; a < kActionDim; ++a) {
+                    if (legal_mask[static_cast<std::size_t>(a)] == 0) {
+                        node.priors[static_cast<std::size_t>(a)] = 0.0f;
+                        continue;
+                    }
+                    ++legal_count;
+                    const float s = priors_view(row_idx, a);
+                    if (std::isfinite(static_cast<double>(s))) {
+                        if (!has_finite_legal_score || s > max_score) {
+                            max_score = s;
+                        }
+                        has_finite_legal_score = true;
+                    }
+                }
 
-        for (pybind11::ssize_t i = 0; i < batch; ++i) {
+                double sum = 0.0;
+                if (has_finite_legal_score) {
+                    for (int a = 0; a < kActionDim; ++a) {
+                        if (legal_mask[static_cast<std::size_t>(a)] == 0) {
+                            node.priors[static_cast<std::size_t>(a)] = 0.0f;
+                            continue;
+                        }
+                        const float s = priors_view(row_idx, a);
+                        if (!std::isfinite(static_cast<double>(s))) {
+                            node.priors[static_cast<std::size_t>(a)] = 0.0f;
+                            continue;
+                        }
+                        const float w = std::exp(s - max_score);
+                        node.priors[static_cast<std::size_t>(a)] = w;
+                        sum += static_cast<double>(w);
+                    }
+                }
+
+                if (!has_finite_legal_score || !(sum > 0.0) || !std::isfinite(sum)) {
+                    const float u = 1.0f / static_cast<float>(legal_count);
+                    for (int a = 0; a < kActionDim; ++a) {
+                        node.priors[static_cast<std::size_t>(a)] =
+                            (legal_mask[static_cast<std::size_t>(a)] != 0) ? u : 0.0f;
+                    }
+                } else {
+                    renormalize_legal_priors(node.priors, legal_mask);
+                }
+            };
+
+        std::vector<std::array<float, kStateDim>> initial_states;
+        std::vector<std::array<std::uint8_t, kActionDim>> initial_masks;
+        initial_states.reserve(pending.size());
+        initial_masks.reserve(pending.size());
+        for (const PendingLeafEval& req : pending) {
+            initial_states.push_back(req.state);
+            initial_masks.push_back(req.mask);
+        }
+        auto [initial_priors_arr, initial_values_arr] = evaluate_batch(initial_states, initial_masks);
+        const auto initial_priors_view = initial_priors_arr.unchecked<2>();
+        const auto initial_values_view = initial_values_arr.unchecked<1>();
+
+        for (pybind11::ssize_t i = 0; i < static_cast<pybind11::ssize_t>(pending.size()); ++i) {
             PendingLeafEval& req = pending[static_cast<std::size_t>(i)];
             MCTSNode& node = nodes[static_cast<std::size_t>(req.node_index)];
-            int legal_count = 0;
-            bool has_finite_legal_score = false;
-            float max_score = -std::numeric_limits<float>::infinity();
-            for (int a = 0; a < kActionDim; ++a) {
-                if (req.mask[static_cast<std::size_t>(a)] == 0) {
-                    node.priors[static_cast<std::size_t>(a)] = 0.0f;
-                    continue;
-                }
-                ++legal_count;
-                const float s = priors_view(i, a);  // Python returns policy scores/logits.
-                if (std::isfinite(static_cast<double>(s))) {
-                    if (!has_finite_legal_score || s > max_score) {
-                        max_score = s;
-                    }
-                    has_finite_legal_score = true;
-                }
-            }
-
-            double sum = 0.0;
-            if (has_finite_legal_score) {
-                for (int a = 0; a < kActionDim; ++a) {
-                    if (req.mask[static_cast<std::size_t>(a)] == 0) {
-                        node.priors[static_cast<std::size_t>(a)] = 0.0f;
-                        continue;
-                    }
-                    const float s = priors_view(i, a);
-                    if (!std::isfinite(static_cast<double>(s))) {
-                        node.priors[static_cast<std::size_t>(a)] = 0.0f;
-                        continue;
-                    }
-                    const float w = std::exp(s - max_score);
-                    node.priors[static_cast<std::size_t>(a)] = w;
-                    sum += static_cast<double>(w);
-                }
-            }
-
-            if (!has_finite_legal_score || !(sum > 0.0) || !std::isfinite(sum)) {
-                const float u = 1.0f / static_cast<float>(legal_count);
-                for (int a = 0; a < kActionDim; ++a) {
-                    node.priors[static_cast<std::size_t>(a)] =
-                        (req.mask[static_cast<std::size_t>(a)] != 0) ? u : 0.0f;
-                }
-            } else {
-                renormalize_legal_priors(node.priors, req.mask);
-            }
+            assign_priors_from_scores(node, req.mask, initial_priors_view, i);
 
             if (req.node_index == 0) {
-                apply_root_blocking_prior_adjustment(
-                    node.priors,
-                    root_state,
-                    req.mask
-                );
+                apply_root_blocking_prior_adjustment(node.priors, root_state, req.mask);
             }
 
-            const float value = values_view(i);
-            if (!std::isfinite(static_cast<double>(value))) {
-                throw std::runtime_error("MCTS evaluator values contain non-finite entries");
+            float value = 0.0f;
+            GameState rollout_state = req.state_snapshot;
+            const int leaf_player = rollout_state.current_player;
+            const int tree_depth = static_cast<int>(req.path.size());
+            int resolved_depth = tree_depth;
+            if (is_modal_subturn_state(rollout_state)) {
+                std::array<float, kActionDim> current_policy_scores{};
+                for (int a = 0; a < kActionDim; ++a) {
+                    current_policy_scores[static_cast<std::size_t>(a)] = initial_priors_view(i, a);
+                }
+
+                while (true) {
+                    NodeMetadata rollout_meta = build_node_metadata(rollout_state);
+                    if (rollout_meta.terminal.is_terminal) {
+                        value = get_terminal_value_from_player_perspective(
+                            rollout_meta.terminal.winner,
+                            rollout_meta.terminal.current_player_id
+                        );
+                        if (rollout_meta.terminal.current_player_id != leaf_player) {
+                            value = -value;
+                        }
+                        break;
+                    }
+
+                    if (!is_modal_subturn_state(rollout_state)) {
+                        std::vector<std::array<float, kStateDim>> final_states{state_encoder::encode_state(rollout_state)};
+                        std::vector<std::array<std::uint8_t, kActionDim>> final_masks{rollout_meta.mask};
+                        auto [final_priors_arr, final_values_arr] = evaluate_batch(final_states, final_masks);
+                        (void)final_priors_arr;
+                        const auto final_values_view = final_values_arr.unchecked<1>();
+                        value = final_values_view(0);
+                        if (!std::isfinite(static_cast<double>(value))) {
+                            throw std::runtime_error("MCTS evaluator values contain non-finite entries");
+                        }
+                        if (rollout_state.current_player != leaf_player) {
+                            value = -value;
+                        }
+                        break;
+                    }
+
+                    const int action = select_max_policy_legal_action(current_policy_scores, rollout_meta.mask);
+                    if (action < 0) {
+                        throw std::runtime_error("Modal subturn state has no legal action to resolve");
+                    }
+                    applyMove(rollout_state, actionIndexToMove(action));
+                    resolved_depth += 1;
+
+                    if (rollout_state.current_player != leaf_player) {
+                        NodeMetadata resolved_meta = build_node_metadata(rollout_state);
+                        if (resolved_meta.terminal.is_terminal) {
+                            value = get_terminal_value_from_player_perspective(
+                                resolved_meta.terminal.winner,
+                                resolved_meta.terminal.current_player_id
+                            );
+                            value = -value;
+                        } else {
+                            std::vector<std::array<float, kStateDim>> final_states{state_encoder::encode_state(rollout_state)};
+                            std::vector<std::array<std::uint8_t, kActionDim>> final_masks{resolved_meta.mask};
+                            auto [final_priors_arr, final_values_arr] = evaluate_batch(final_states, final_masks);
+                            (void)final_priors_arr;
+                            const auto final_values_view = final_values_arr.unchecked<1>();
+                            value = final_values_view(0);
+                            if (!std::isfinite(static_cast<double>(value))) {
+                                throw std::runtime_error("MCTS evaluator values contain non-finite entries");
+                            }
+                            value = -value;
+                        }
+                        break;
+                    }
+
+                    NodeMetadata next_meta = build_node_metadata(rollout_state);
+                    if (next_meta.terminal.is_terminal) {
+                        value = get_terminal_value_from_player_perspective(
+                            next_meta.terminal.winner,
+                            next_meta.terminal.current_player_id
+                        );
+                        break;
+                    }
+
+                    std::vector<std::array<float, kStateDim>> next_states{state_encoder::encode_state(rollout_state)};
+                    std::vector<std::array<std::uint8_t, kActionDim>> next_masks{next_meta.mask};
+                    auto [next_priors_arr, next_values_arr] = evaluate_batch(next_states, next_masks);
+                    (void)next_values_arr;
+                    const auto next_priors_view = next_priors_arr.unchecked<2>();
+                    for (int a = 0; a < kActionDim; ++a) {
+                        current_policy_scores[static_cast<std::size_t>(a)] = next_priors_view(0, a);
+                    }
+                }
+            } else {
+                value = initial_values_view(i);
+                if (!std::isfinite(static_cast<double>(value))) {
+                    throw std::runtime_error("MCTS evaluator values contain non-finite entries");
+                }
             }
+
             node.expanded = true;
             node.pending_eval = false;
             pending_flags[static_cast<std::size_t>(req.node_index)].store(0U, std::memory_order_release);
@@ -1461,6 +1647,8 @@ NativeMCTSResult run_native_mcts(
 
             ReadyBackup ready;
             ready.value = value;
+            ready.tree_depth = tree_depth > 0 ? tree_depth : -1;
+            ready.resolved_depth = resolved_depth > 0 ? resolved_depth : -1;
             ready.path = std::move(req.path);
             backups.push_back(std::move(ready));
         }
@@ -1523,6 +1711,7 @@ NativeMCTSResult run_native_mcts(
         root_backups.reserve(1);
         PendingLeafEval req;
         req.node_index = 0;
+        req.state_snapshot = root_state;
         req.state = state_encoder::encode_state(root_state);
         req.mask = root_mask;
         pending_root.push_back(std::move(req));
@@ -1576,6 +1765,8 @@ NativeMCTSResult run_native_mcts(
                             node_data.terminal.winner,
                             node_data.terminal.current_player_id
                         );
+                        ready.tree_depth = static_cast<int>(path.size());
+                        ready.resolved_depth = static_cast<int>(path.size());
                         ready.path = std::move(path);
                         backups.push_back(std::move(ready));
                         break;
@@ -1590,6 +1781,7 @@ NativeMCTSResult run_native_mcts(
                         pending_flags[static_cast<std::size_t>(node_index)].store(1U, std::memory_order_release);
                         PendingLeafEval req;
                         req.node_index = node_index;
+                        req.state_snapshot = sim_state;
                         req.state = state_encoder::encode_state(sim_state);
                         req.mask = node_data.mask;
                         req.path = std::move(path);
@@ -1679,6 +1871,8 @@ NativeMCTSResult run_native_mcts(
                                     node_data.terminal.winner,
                                     node_data.terminal.current_player_id
                                 );
+                                ready.tree_depth = static_cast<int>(path.size());
+                                ready.resolved_depth = static_cast<int>(path.size());
                                 ready.path = std::move(path);
                                 local_backups.push_back(std::move(ready));
                                 break;
@@ -1703,6 +1897,7 @@ NativeMCTSResult run_native_mcts(
                                     );
                                     PendingLeafEval req;
                                     req.node_index = node_index;
+                                    req.state_snapshot = sim_state;
                                     req.state = state_encoder::encode_state(sim_state);
                                     req.mask = node_data.mask;
                                     req.path = std::move(path);
@@ -1799,6 +1994,14 @@ NativeMCTSResult run_native_mcts(
 
         pybind11::gil_scoped_release release;
         for (ReadyBackup& ready : backups) {
+            if (ready.tree_depth >= 0) {
+                record_depth_histogram(leaf_depth_histogram, ready.tree_depth);
+                max_leaf_depth = std::max(max_leaf_depth, ready.tree_depth);
+            }
+            if (ready.resolved_depth >= 0) {
+                record_depth_histogram(resolved_depth_histogram, ready.resolved_depth);
+                max_resolved_depth = std::max(max_resolved_depth, ready.resolved_depth);
+            }
             apply_ready_backup_virtual(ready);
         }
 
@@ -1811,6 +2014,10 @@ NativeMCTSResult run_native_mcts(
     result.search_slots_evaluated = completed - 1; // subtract 1 for the pre-expanded root
     result.search_slots_drop_pending_eval = total_slots_drop_pending_eval;
     result.search_slots_drop_no_action = total_slots_drop_no_action;
+    result.max_leaf_depth = max_leaf_depth;
+    result.max_resolved_depth = max_resolved_depth;
+    result.leaf_depth_histogram = std::move(leaf_depth_histogram);
+    result.resolved_depth_histogram = std::move(resolved_depth_histogram);
     const auto raw_visit_probs = visit_probs_from_counts(root, root_mask);
     result.chosen_action_idx = sample_action_from_visits(
         raw_visit_probs, root_mask, turns_taken, temperature_moves, temperature, rng

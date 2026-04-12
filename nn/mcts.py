@@ -37,6 +37,10 @@ class MCTSResult:
     search_slots_evaluated: int
     search_slots_drop_pending_eval: int
     search_slots_drop_no_action: int
+    leaf_depth_histogram: np.ndarray
+    resolved_depth_histogram: np.ndarray
+    max_leaf_depth: int
+    max_resolved_depth: int
 
 def run_mcts(
     env: Any,
@@ -149,4 +153,8 @@ def run_mcts(
         search_slots_evaluated=int(native_result.search_slots_evaluated),
         search_slots_drop_pending_eval=int(getattr(native_result, "search_slots_drop_pending_eval", 0)),
         search_slots_drop_no_action=int(getattr(native_result, "search_slots_drop_no_action", 0)),
+        leaf_depth_histogram=np.asarray(getattr(native_result, "leaf_depth_histogram", ()), dtype=np.int32).copy(),
+        resolved_depth_histogram=np.asarray(getattr(native_result, "resolved_depth_histogram", ()), dtype=np.int32).copy(),
+        max_leaf_depth=int(getattr(native_result, "max_leaf_depth", 0)),
+        max_resolved_depth=int(getattr(native_result, "max_resolved_depth", 0)),
     )

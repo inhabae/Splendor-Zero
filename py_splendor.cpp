@@ -1250,12 +1250,16 @@ PYBIND11_MODULE(splendor_native, m) {
     py::class_<NativeMCTSResult>(m, "NativeMCTSResult")
         .def_property_readonly("visit_probs", &NativeMCTSResult::visit_probs_array)
         .def_property_readonly("q_values", &NativeMCTSResult::q_values_array)
+        .def_property_readonly("leaf_depth_histogram", &NativeMCTSResult::leaf_depth_histogram_array)
+        .def_property_readonly("resolved_depth_histogram", &NativeMCTSResult::resolved_depth_histogram_array)
         .def_readonly("chosen_action_idx", &NativeMCTSResult::chosen_action_idx)
         .def_readonly("root_best_value", &NativeMCTSResult::root_best_value)
         .def_readonly("search_slots_requested", &NativeMCTSResult::search_slots_requested)
         .def_readonly("search_slots_evaluated", &NativeMCTSResult::search_slots_evaluated)
         .def_readonly("search_slots_drop_pending_eval", &NativeMCTSResult::search_slots_drop_pending_eval)
-        .def_readonly("search_slots_drop_no_action", &NativeMCTSResult::search_slots_drop_no_action);
+        .def_readonly("search_slots_drop_no_action", &NativeMCTSResult::search_slots_drop_no_action)
+        .def_readonly("max_leaf_depth", &NativeMCTSResult::max_leaf_depth)
+        .def_readonly("max_resolved_depth", &NativeMCTSResult::max_resolved_depth);
 
     py::class_<EndgameSolverResult>(m, "EndgameSolverResult")
         .def_readonly("best_action", &EndgameSolverResult::best_action)
