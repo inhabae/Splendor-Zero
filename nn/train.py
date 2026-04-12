@@ -72,6 +72,32 @@ def _rolling_replay_window_generations(global_cycle_idx: int) -> int:
     return min(20, 4 + ((generation_idx - 4) // 2))
 
 
+def compute_slow_window_max_generations(
+    local_cycle_idx: int,
+    *,
+    min_generations: int = 4,
+    max_generations: int = 20,
+    ramp_every: int = 2,
+    ramp_start_cycle: int = 5,
+) -> int:
+    local_cycle_idx = int(local_cycle_idx)
+    min_generations = int(min_generations)
+    max_generations = int(max_generations)
+    ramp_every = int(ramp_every)
+    ramp_start_cycle = int(ramp_start_cycle)
+    if local_cycle_idx < 0:
+        raise ValueError("local_cycle_idx must be non-negative")
+    if min_generations <= 0:
+        raise ValueError("min_generations must be positive")
+    if max_generations < min_generations:
+        raise ValueError("max_generations must be >= min_generations")
+    if ramp_every <= 0:
+        raise ValueError("ramp_every must be positive")
+    if local_cycle_idx < ramp_start_cycle:
+        return min_generations
+    return min(max_generations, min_generations + ((local_cycle_idx - ramp_start_cycle) // ramp_every))
+
+
 def _configure_mcts_tree_workers(mcts_tree_workers: int | None) -> None:
     if mcts_tree_workers is None:
         return
@@ -1340,6 +1366,7 @@ def run_cycles(
     viz_save_every_cycle: int = 1,
     collector_workers: int | None = None,
     benchmark_workers: int = 1,
+    slow_window: bool = False,
     profile_timing: bool = False,
     profile_out_dir: str = "nn_artifacts/profiles",
     profile_tag: str | None = None,
@@ -1579,7 +1606,9 @@ def run_cycles(
         else nullcontext(None)
     )
     with pool_ctx as parallel_worker_pool, benchmark_pool_ctx as benchmark_worker_pool, SplendorNativeEnv() as env:
+        final_replay_window_target_generations = 0
         for cycle_idx in range(1, cycles + 1):
+            local_cycle_idx = cycle_idx - 1
             global_cycle_idx = resume_base_cycle_idx + cycle_idx
             cycle_timing = _new_cycle_timing_sections()
             cycle_wall_t0 = time.perf_counter()
@@ -1670,7 +1699,13 @@ def run_cycles(
             replay.finalize_generation(
                 replay_games_added=int(collection_metrics.get("replay_games_added", 0.0)),
             )
-            replay_window_target_generations = _rolling_replay_window_generations(cycle_idx)
+            max_replay_generations = _rolling_replay_window_generations(cycle_idx)
+            replay_window_target_generations = (
+                compute_slow_window_max_generations(local_cycle_idx)
+                if slow_window
+                else max_replay_generations
+            )
+            final_replay_window_target_generations = int(replay_window_target_generations)
             replay_generations_dropped = replay.trim_generations(replay_window_target_generations)
             replay_added = len(replay) - replay_size_before_collect
 
@@ -1760,6 +1795,7 @@ def run_cycles(
                 f"collection_wall_sec={float(collection_metrics.get('collection_wall_sec', 0.0)):.3f} "
                 f"collection_steps_per_sec={float(collection_metrics.get('collection_steps_per_sec', 0.0)):.1f} "
                 f"replay_buffer_size={len(replay)} "
+                f"slow_window_max_gens={replay_window_target_generations} "
                 f"replay_window_target_generations={replay_window_target_generations} "
                 f"replay_window_generations_kept={replay.generation_count} "
                 f"replay_window_generations_dropped={replay_generations_dropped} "
@@ -2256,7 +2292,7 @@ def run_cycles(
         "save_every_checkpoint": float(1 if save_every_checkpoint else 0),
         "save_replay_buffer": float(1 if save_replay_buffer else 0),
         "replay_window_max_generations": 20.0,
-        "replay_window_target_generations": float(_rolling_replay_window_generations(resume_base_cycle_idx + cycles)),
+        "replay_window_target_generations": float(final_replay_window_target_generations),
         "replay_window_generations_kept": float(replay.generation_count),
         "cycles": float(cycles),
         "episodes_per_cycle": float(episodes_per_cycle),
@@ -2492,6 +2528,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--viz-save-every-cycle", type=int, default=1)
     p.add_argument("--collector-workers", type=int, default=None)
     p.add_argument("--benchmark-workers", type=int, default=1)
+    p.add_argument("--slow-window", action="store_true")
     p.add_argument("--profile-timing", action="store_true")
     p.add_argument("--profile-out-dir", type=str, default="nn_artifacts/profiles")
     p.add_argument("--profile-tag", type=str, default=None)
@@ -2577,6 +2614,7 @@ def main() -> None:
             viz_save_every_cycle=args.viz_save_every_cycle,
             collector_workers=args.collector_workers,
             benchmark_workers=args.benchmark_workers,
+            slow_window=args.slow_window,
             profile_timing=args.profile_timing,
             profile_out_dir=args.profile_out_dir,
             profile_tag=args.profile_tag,
