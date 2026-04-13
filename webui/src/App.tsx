@@ -39,6 +39,12 @@ const DEFAULT_DEEP_ANALYSIS_SIMULATIONS = 50_000;
 const DEFAULT_GPU_EVAL_BATCH_SIZE = 32;
 const MAX_EVAL_BATCH_SIZE = 1024;
 const DEFAULT_ALPHABETA_DEPTH = 3;
+const DEFAULT_BOOTSTRAP_SIMULATIONS_PER_ACTION = 2000;
+
+function analysisPublishInterval(totalSimulations: number): number {
+  const normalized = Number.isInteger(totalSimulations) && totalSimulations >= 1 ? totalSimulations : 1;
+  return Math.max(64, Math.min(2000, Math.floor(normalized / 20) || 1));
+}
 
 function isContinuationAction(actionIdx: number): boolean {
   return actionIdx >= 61 && actionIdx <= 68;
@@ -117,6 +123,9 @@ function moveAnalysisKey(move: Pick<MoveLogEntryDTO, 'result_snapshot_index' | '
 function searchTypeLabel(searchType: SearchType): string {
   if (searchType === 'mcts_gpu') {
     return 'MCTS (GPU batched)';
+  }
+  if (searchType === 'mcts_bootstrap') {
+    return 'MCTS Bootstrap';
   }
   if (searchType === 'ismcts') {
     return 'ISMCTS';
@@ -873,6 +882,13 @@ const displayedP0EvalRef = useRef<number | null>(null);
       Number.isInteger(requestedEvalBatchSize) && requestedEvalBatchSize >= 1
         ? requestedEvalBatchSize
         : DEFAULT_GPU_EVAL_BATCH_SIZE;
+    const supportsProgressiveTreeUpdates =
+      activeSearchType === 'mcts' || activeSearchType === 'mcts_gpu' || activeSearchType === 'mcts_bootstrap';
+    const useProgressiveSearch = supportsProgressiveTreeUpdates && (homeView === 'LIVE' || homeView === 'ANALYSIS');
+    const totalSearchBudget = homeView === 'LIVE' ? LIVE_SEARCH_MAX_SIMULATIONS : nextNumSimulations;
+    const publishInterval = homeView === 'LIVE'
+      ? nextNumSimulations
+      : analysisPublishInterval(nextNumSimulations);
 
     if (activeSearchType === 'alphabeta') {
       return {
@@ -893,11 +909,14 @@ const displayedP0EvalRef = useRef<number | null>(null);
     }
 
     return {
-      num_simulations: nextNumSimulations,
+      num_simulations: useProgressiveSearch ? publishInterval : nextNumSimulations,
       search_type: activeSearchType,
-      continuous_until_cancel: homeView === 'LIVE',
-      max_total_simulations: homeView === 'LIVE' ? LIVE_SEARCH_MAX_SIMULATIONS : nextNumSimulations,
+      continuous_until_cancel: useProgressiveSearch,
+      max_total_simulations: useProgressiveSearch ? totalSearchBudget : nextNumSimulations,
       ...(activeSearchType === 'mcts_gpu' ? { eval_batch_size: nextEvalBatchSize } : {}),
+      ...(activeSearchType === 'mcts_bootstrap'
+        ? { bootstrap_simulations_per_action: DEFAULT_BOOTSTRAP_SIMULATIONS_PER_ACTION }
+        : {}),
       ...(options?.forcedRootActionIdx != null ? { forced_root_action_idx: options.forcedRootActionIdx } : {}),
     };
   }
@@ -2180,8 +2199,9 @@ const displayedP0EvalRef = useRef<number | null>(null);
   }
 
   const canStart = Boolean(selectedCheckpoint) && numSimulations > 0 && numSimulations <= 10000;
-  const isTreeSearchType = searchType === 'mcts' || searchType === 'mcts_gpu' || searchType === 'ismcts';
-  const usesEvalBatchSize = searchType === 'mcts_gpu';
+  const isTreeSearchType =
+    searchType === 'mcts' || searchType === 'mcts_gpu' || searchType === 'mcts_bootstrap' || searchType === 'ismcts';
+  const usesEvalBatchSize = searchType === 'mcts_gpu' || searchType === 'mcts_bootstrap';
   const canRunCurrentSearch = (() => {
     if (searchType === 'alphabeta') {
       return alphabetaDepth >= 1;
@@ -2210,14 +2230,20 @@ const displayedP0EvalRef = useRef<number | null>(null);
     if (searchType === 'forced_child') {
       return `${searchTypeLabel(searchType)} • ${searchSimulations.toLocaleString()} per action`;
     }
-    if (searchType === 'mcts_gpu') {
+    if (searchType === 'mcts_gpu' || searchType === 'mcts_bootstrap') {
       if (homeView === 'LIVE') {
         return `${searchTypeLabel(searchType)} | publish every ${searchSimulations.toLocaleString()} sims | batch ${searchEvalBatchSize.toLocaleString()}`;
+      }
+      if (homeView === 'ANALYSIS') {
+        return `${searchTypeLabel(searchType)} | ${searchSimulations.toLocaleString()} total sims | publish every ${analysisPublishInterval(searchSimulations).toLocaleString()} | batch ${searchEvalBatchSize.toLocaleString()}`;
       }
       return `${searchTypeLabel(searchType)} | ${searchSimulations.toLocaleString()} sims | batch ${searchEvalBatchSize.toLocaleString()}`;
     }
     if (homeView === 'LIVE') {
       return `${searchTypeLabel(searchType)} • publish every ${searchSimulations.toLocaleString()} sims`;
+    }
+    if (homeView === 'ANALYSIS' && searchType === 'mcts') {
+      return `${searchTypeLabel(searchType)} • ${searchSimulations.toLocaleString()} total sims • publish every ${analysisPublishInterval(searchSimulations).toLocaleString()} sims`;
     }
     return `${searchTypeLabel(searchType)} • ${searchSimulations.toLocaleString()} sims`;
   })();
@@ -3518,6 +3544,7 @@ const displayedP0EvalRef = useRef<number | null>(null);
                           >
                             <option value="mcts">MCTS</option>
                             <option value="mcts_gpu">MCTS (GPU batched)</option>
+                            <option value="mcts_bootstrap">MCTS Bootstrap</option>
                             <option value="ismcts">ISMCTS</option>
                             <option value="alphabeta">Alpha-Beta</option>
                             <option value="forced_child">Forced Search</option>
@@ -3670,11 +3697,13 @@ const displayedP0EvalRef = useRef<number | null>(null);
               )}
               {uiStatus === 'WAITING_REVEAL' && <p>Waiting for board update before the next move.</p>}
               {jobStatus?.error && <p className="error">Engine error: {jobStatus.error}</p>}
-              {homeView === 'LIVE' && (
+              {(homeView === 'LIVE' || homeView === 'ANALYSIS') && (
                 <p>
-                  {isTreeSearchType
+                  {homeView === 'LIVE' && (searchType === 'mcts' || searchType === 'mcts_gpu' || searchType === 'mcts_bootstrap')
                     ? `Live mode runs one search job up to ${LIVE_SEARCH_MAX_SIMULATIONS.toLocaleString()} sims and publishes updated analysis every ${searchSimulations.toLocaleString()} sims.${searchType === 'mcts_gpu' ? ` Leaf evaluations are batched in groups of ${searchEvalBatchSize.toLocaleString()}.` : ''}`
-                    : `Live mode runs ${searchTypeLabel(searchType)} as a single-shot search for the current turn.`}
+                    : homeView === 'ANALYSIS' && (searchType === 'mcts' || searchType === 'mcts_gpu' || searchType === 'mcts_bootstrap')
+                      ? `Analysis mode runs one search job for ${searchSimulations.toLocaleString()} total sims and publishes updated analysis every ${analysisPublishInterval(searchSimulations).toLocaleString()} sims.${searchType === 'mcts_gpu' ? ` Leaf evaluations are batched in groups of ${searchEvalBatchSize.toLocaleString()}.` : ''}`
+                      : `${homeView === 'LIVE' ? 'Live mode' : 'Analysis mode'} runs ${searchTypeLabel(searchType)} as a single-shot search for the current turn.`}
                   {jobStatus?.status === 'RUNNING' && ' Search in progress.'}
                   {isTreeSearchType && jobStatus?.result?.total_simulations != null && ` Current total: ${jobStatus.result.total_simulations}.`}
                 </p>

@@ -23,6 +23,7 @@ _REQUIRED_NATIVE_ENV_METHODS = (
     "clone",
     "step",
     "run_mcts",
+    "create_mcts_session",
     "heuristic_action",
 )
 
@@ -197,6 +198,11 @@ class SplendorNativeEnv:
         if not self._initialized:
             raise RuntimeError("Game not initialized; call reset() first")
         return self._env.run_mcts(evaluator, **kwargs)
+
+    def create_mcts_session(self, evaluator, **kwargs):
+        if not self._initialized:
+            raise RuntimeError("Game not initialized; call reset() first")
+        return self._env.create_mcts_session(evaluator, **kwargs)
 
     def run_ismcts_native(self, evaluator, **kwargs):
         if not self._initialized:

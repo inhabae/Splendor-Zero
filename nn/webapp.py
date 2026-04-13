@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from .checkpoints import load_checkpoint
 from .ismcts import ISMCTSConfig, run_ismcts
-from .mcts import MCTSConfig, run_mcts
+from .mcts import MCTSConfig, create_mcts_session, run_mcts
 from .native_env import SplendorNativeEnv, StepState, list_standard_cards, list_standard_nobles
 from spendee.engine_policy import (
     AlphaBetaConfig,
@@ -261,13 +261,14 @@ class JumpToSnapshotRequest(BaseModel):
 
 class EngineThinkRequest(BaseModel):
     num_simulations: int | None = Field(default=None, ge=1, le=50000000)
-    search_type: Literal["mcts", "mcts_gpu", "ismcts", "alphabeta", "forced_child"] = "mcts"
+    search_type: Literal["mcts", "mcts_gpu", "mcts_bootstrap", "ismcts", "alphabeta", "forced_child"] = "mcts"
     continuous_until_cancel: bool = False
     max_total_simulations: int | None = Field(default=None, ge=1, le=50000000)
     eval_batch_size: int | None = Field(default=None, ge=1, le=1024)
     forced_root_action_idx: int | None = Field(default=None, ge=0, lt=ACTION_DIM)
     alphabeta_depth: int | None = Field(default=None, ge=1, le=64)
     forced_child_simulations_per_action: int | None = Field(default=None, ge=1, le=50000000)
+    bootstrap_simulations_per_action: int | None = Field(default=None, ge=1, le=50000000)
 
 
 class RevealCardRequest(BaseModel):
@@ -304,7 +305,7 @@ class RevealCardResponse(BaseModel):
 
 class EngineResultDTO(BaseModel):
     action_idx: int
-    search_type: Literal["mcts", "mcts_gpu", "ismcts", "alphabeta", "forced_child"] = "mcts"
+    search_type: Literal["mcts", "mcts_gpu", "mcts_bootstrap", "ismcts", "alphabeta", "forced_child"] = "mcts"
     action_details: list[ActionVizDTO] = Field(default_factory=list)
     model_action_details: list[ActionVizDTO] | None = None
     root_value: float | None = None
@@ -490,8 +491,10 @@ class EngineJob:
     root_value: float | None = None
     selected_action_q: float | None = None
     total_simulations: int = 0
-    search_type: Literal["mcts", "mcts_gpu", "ismcts", "alphabeta", "forced_child"] = "mcts"
+    search_type: Literal["mcts", "mcts_gpu", "mcts_bootstrap", "ismcts", "alphabeta", "forced_child"] = "mcts"
     forced_root_action_idx: int | None = None
+    started_at: float | None = None
+    last_publish_at: float | None = None
 
 
 @dataclass
@@ -1461,6 +1464,16 @@ def _forced_deck_reserve_action(start_state: dict[str, Any], end_state: dict[str
     if len(deck_drop_tiers) != 1:
         return None
     return 27 + deck_drop_tiers[0] - 1
+
+
+def _split_bootstrap_budget(total_budget: int, num_actions: int) -> list[int]:
+    if num_actions <= 0:
+        return []
+    if total_budget <= 0:
+        return [0] * num_actions
+    base = total_budget // num_actions
+    remainder = total_budget % num_actions
+    return [base + (1 if idx < remainder else 0) for idx in range(num_actions)]
 
 
 def _game_event_to_dto(event: GameEvent) -> GameEventDTO:
@@ -2796,9 +2809,18 @@ class GameManager:
                 if req is not None and req.forced_child_simulations_per_action is not None
                 else num_simulations
             )
-            normalized_search_type = search_type if search_type in ("mcts", "mcts_gpu", "ismcts", "alphabeta", "forced_child") else "mcts"
+            bootstrap_simulations_per_action = (
+                int(req.bootstrap_simulations_per_action)
+                if req is not None and req.bootstrap_simulations_per_action is not None
+                else 2000
+            )
+            normalized_search_type = (
+                search_type
+                if search_type in ("mcts", "mcts_gpu", "mcts_bootstrap", "ismcts", "alphabeta", "forced_child")
+                else "mcts"
+            )
 
-            if continuous_until_cancel and normalized_search_type not in ("mcts", "mcts_gpu", "ismcts"):
+            if continuous_until_cancel and normalized_search_type not in ("mcts", "mcts_gpu", "mcts_bootstrap"):
                 raise HTTPException(status_code=400, detail=f"{normalized_search_type} does not support continuous mode")
 
             job = EngineJob(
@@ -2828,6 +2850,8 @@ class GameManager:
             turns_taken = int(self._turn_index)
 
             def _run() -> int:
+                import time
+
                 with self._lock:
                     cur_job = self._jobs.get(job.job_id)
                     if cur_job is None:
@@ -2840,9 +2864,11 @@ class GameManager:
                         cur_job.status = "CANCELLED"
                         raise RuntimeError("Engine job cancelled")
                     cur_job.status = "RUNNING"
+                    cur_job.started_at = time.time()
+                    cur_job.last_publish_at = cur_job.started_at
 
                 try:
-                    with self._lock:
+                    def _require_active_job_locked() -> EngineJob:
                         cur_job = self._jobs.get(job.job_id)
                         if cur_job is None:
                             raise RuntimeError("Engine job disappeared")
@@ -2853,32 +2879,155 @@ class GameManager:
                         if cur_job.cancel_event.is_set():
                             cur_job.status = "CANCELLED"
                             raise RuntimeError("Engine job cancelled")
+                        return cur_job
+
+                    def _publish_tree_result(tree_result: Any, *, total_sims: int, finalize: bool) -> int:
+                        policy = np.asarray(tree_result.visit_probs, dtype=np.float32)
+                        q_values = np.asarray(tree_result.q_values, dtype=np.float32)
+                        selected_action_idx = int(_best_legal_action(search_step.mask, policy))
+                        selected_action_q = float(q_values[selected_action_idx])
+                        search_board = _decode_board_state(
+                            search_step,
+                            turn_index=self._turn_index,
+                            player_seat=_seat_str(search_step.current_player_id),
+                            pending_reveals=self._pending_reveals,
+                            hidden_deck_card_ids_by_tier=env.hidden_deck_card_ids_by_tier(),
+                        )
+                        action_details = _action_viz_rows(
+                            search_step.mask,
+                            policy,
+                            selected_action_idx,
+                            search_board,
+                            _seat_str(search_step.current_player_id),
+                            q_values,
+                        )
+                        model_action_details = None
+                        if finalize:
+                            model_eval = _evaluate_model_replay_state(
+                                {"checkpoint_path": str(config.checkpoint_path)},
+                                search_step.state,
+                                search_step.mask,
+                                selected_action_idx,
+                            )
+                            if model_eval is not None:
+                                model_policy, _ = model_eval
+                                model_action_details = _action_viz_rows(
+                                    search_step.mask,
+                                    model_policy,
+                                    selected_action_idx,
+                                    search_board,
+                                    _seat_str(search_step.current_player_id),
+                                )
+
+                        with self._lock:
+                            cur_job = _require_active_job_locked()
+                            cur_job.action_idx = selected_action_idx
+                            cur_job.action_details = action_details
+                            cur_job.root_value = float(tree_result.root_best_value)
+                            cur_job.selected_action_q = float(selected_action_q)
+                            cur_job.total_simulations = int(total_sims)
+                            cur_job.search_type = normalized_search_type
+                            cur_job.model_action_details = model_action_details
+                            cur_job.last_publish_at = time.time()
+                            if finalize:
+                                cur_job.status = "DONE"
+                                if self._active_job_id == job.job_id:
+                                    self._active_job_id = None
+                        return selected_action_idx
+
+                    with self._lock:
+                        _require_active_job_locked()
 
                     search_budget = max_total_simulations if continuous_until_cancel else num_simulations
                     total_simulations: int | None = None
                     deterministic_q_values: np.ndarray | None = None
-                    import time
                     start_time = time.time()
-                    if normalized_search_type in ("mcts", "mcts_gpu"):
-                        result = run_mcts(
-                            search_env,
-                            model,
-                            state=search_step,
-                            turns_taken=turns_taken,
-                            device=search_device,
-                            config=MCTSConfig(
-                                num_simulations=search_budget,
-                                c_puct=1.25,
-                                temperature_moves=0,
-                                temperature=0.0,
-                                root_dirichlet_noise=False,
-                                eval_batch_size=eval_batch_size if normalized_search_type == "mcts_gpu" else 1,
-                                use_forced_playouts=False,
-                                forced_root_action_idx=forced_root_action_idx,
-                            ),
-                            rng=search_rng,
+                    if normalized_search_type in ("mcts", "mcts_gpu", "mcts_bootstrap"):
+                        mcts_config = MCTSConfig(
+                            num_simulations=search_budget,
+                            c_puct=1.25,
+                            temperature_moves=0,
+                            temperature=0.0,
+                            root_dirichlet_noise=False,
+                            eval_batch_size=eval_batch_size if normalized_search_type in ("mcts_gpu", "mcts_bootstrap") else 1,
+                            use_forced_playouts=False,
+                            forced_root_action_idx=forced_root_action_idx,
                         )
-                        total_simulations = int(search_budget)
+                        if normalized_search_type == "mcts_bootstrap":
+                            session = create_mcts_session(
+                                search_env,
+                                model,
+                                state=search_step,
+                                turns_taken=turns_taken,
+                                device=search_device,
+                                config=mcts_config,
+                                rng=search_rng,
+                            )
+                            result = None
+                            legal_root_actions = [int(action) for action in np.flatnonzero(np.asarray(search_step.mask, dtype=bool))]
+                            if forced_root_action_idx is not None:
+                                legal_root_actions = [int(forced_root_action_idx)]
+                            total_bootstrap_requested = bootstrap_simulations_per_action * len(legal_root_actions)
+                            bootstrap_total_budget = min(search_budget, total_bootstrap_requested)
+                            bootstrap_budgets = _split_bootstrap_budget(bootstrap_total_budget, len(legal_root_actions))
+                            for action_idx, action_budget in zip(legal_root_actions, bootstrap_budgets):
+                                if action_budget <= 0:
+                                    continue
+                                with self._lock:
+                                    _require_active_job_locked()
+                                result = session.advance(int(action_budget), forced_root_action_idx=int(action_idx))
+                                total_simulations = int(session.simulations_completed)
+                                if continuous_until_cancel:
+                                    _publish_tree_result(result, total_sims=total_simulations, finalize=False)
+                            sims_left = int(search_budget) - int(session.simulations_completed)
+                            if sims_left > 0:
+                                if continuous_until_cancel:
+                                    chunk_size = max(1, int(num_simulations))
+                                    while session.simulations_completed < search_budget:
+                                        with self._lock:
+                                            _require_active_job_locked()
+                                        sims_left = int(search_budget) - int(session.simulations_completed)
+                                        result = session.advance(min(chunk_size, sims_left))
+                                        total_simulations = int(session.simulations_completed)
+                                        _publish_tree_result(result, total_sims=total_simulations, finalize=False)
+                                else:
+                                    result = session.advance(int(sims_left))
+                                    total_simulations = int(session.simulations_completed)
+                            elif result is None:
+                                result = session.snapshot()
+                                total_simulations = int(session.simulations_completed)
+                        elif continuous_until_cancel:
+                            session = create_mcts_session(
+                                search_env,
+                                model,
+                                state=search_step,
+                                turns_taken=turns_taken,
+                                device=search_device,
+                                config=mcts_config,
+                                rng=search_rng,
+                            )
+                            result = None
+                            chunk_size = max(1, int(num_simulations))
+                            while session.simulations_completed < search_budget:
+                                with self._lock:
+                                    _require_active_job_locked()
+                                sims_left = int(search_budget) - int(session.simulations_completed)
+                                result = session.advance(min(chunk_size, sims_left))
+                                total_simulations = int(session.simulations_completed)
+                                _publish_tree_result(result, total_sims=total_simulations, finalize=False)
+                            if result is None:
+                                raise RuntimeError("Engine search finished without a result")
+                        else:
+                            result = run_mcts(
+                                search_env,
+                                model,
+                                state=search_step,
+                                turns_taken=turns_taken,
+                                device=search_device,
+                                config=mcts_config,
+                                rng=search_rng,
+                            )
+                            total_simulations = int(search_budget)
                     elif normalized_search_type == "ismcts":
                         result = run_ismcts(
                             search_env,
@@ -2978,20 +3127,25 @@ class GameManager:
                             policy = np.zeros((ACTION_DIM,), dtype=np.float32)
                             policy[selected_action_idx] = 1.0
                         result = None
+
                     elapsed = time.time() - start_time
                     if result is not None:
-                        print(f"[{normalized_search_type.upper()}] Time: {elapsed:.3f}s | Budget: {search_budget} | "
-                              f"Requested: {result.search_slots_requested} | "
-                              f"Evaluated: {result.search_slots_evaluated} | "
-                              f"Dropped (pending): {result.search_slots_drop_pending_eval} | "
-                              f"Dropped (no action): {result.search_slots_drop_no_action}", flush=True)
-                        policy = np.asarray(result.visit_probs, dtype=np.float32)
-                        q_values = np.asarray(result.q_values, dtype=np.float32)
-                        selected_action_idx = int(_best_legal_action(search_step.mask, policy))
-                        selected_action_q = float(q_values[selected_action_idx])
-                    else:
-                        q_values = deterministic_q_values
-                        print(f"[{normalized_search_type.upper()}] Time: {elapsed:.3f}s", flush=True)
+                        print(
+                            f"[{normalized_search_type.upper()}] Time: {elapsed:.3f}s | Budget: {search_budget} | "
+                            f"Requested: {result.search_slots_requested} | "
+                            f"Evaluated: {result.search_slots_evaluated} | "
+                            f"Dropped (pending): {result.search_slots_drop_pending_eval} | "
+                            f"Dropped (no action): {result.search_slots_drop_no_action}",
+                            flush=True,
+                        )
+                        return _publish_tree_result(
+                            result,
+                            total_sims=(0 if total_simulations is None else int(total_simulations)),
+                            finalize=True,
+                        )
+
+                    q_values = deterministic_q_values
+                    print(f"[{normalized_search_type.upper()}] Time: {elapsed:.3f}s", flush=True)
 
                     search_board = _decode_board_state(
                         search_step,
@@ -3008,55 +3162,23 @@ class GameManager:
                         _seat_str(search_step.current_player_id),
                         q_values,
                     )
-                    model_action_details = None
-
                     if forced_root_action_idx is not None:
                         selected_action_idx = int(forced_root_action_idx)
                         action_details = []
-                    else:
-                        model_eval = _evaluate_model_replay_state(
-                            {"checkpoint_path": str(config.checkpoint_path)},
-                            search_step.state,
-                            search_step.mask,
-                            selected_action_idx,
-                        )
-                        if model_eval is not None:
-                            model_policy, _ = model_eval
-                            model_action_details = _action_viz_rows(
-                                search_step.mask,
-                                model_policy,
-                                selected_action_idx,
-                                search_board,
-                                _seat_str(search_step.current_player_id),
-                            )
 
                     with self._lock:
-                        cur_job = self._jobs.get(job.job_id)
-                        if cur_job is None:
-                            raise RuntimeError("Engine job disappeared")
-                        if cur_job.cancel_event.is_set():
-                            cur_job.status = "CANCELLED"
-                            raise RuntimeError("Engine job cancelled")
+                        cur_job = _require_active_job_locked()
                         cur_job.action_idx = selected_action_idx
                         cur_job.action_details = action_details
-                        cur_job.root_value = float(result.root_best_value) if result is not None else float(selected_action_q)
+                        cur_job.root_value = float(selected_action_q)
                         cur_job.selected_action_q = float(selected_action_q)
                         cur_job.total_simulations = 0 if total_simulations is None else total_simulations
                         cur_job.search_type = normalized_search_type
-                        cur_job.model_action_details = model_action_details
-
-                    with self._lock:
-                        cur_job = self._jobs.get(job.job_id)
-                        if cur_job is None:
-                            raise RuntimeError("Engine job disappeared")
-                        if cur_job.cancel_event.is_set():
-                            cur_job.status = "CANCELLED"
-                            raise RuntimeError("Engine job cancelled")
+                        cur_job.model_action_details = None
+                        cur_job.last_publish_at = time.time()
                         cur_job.status = "DONE"
                         if self._active_job_id == job.job_id:
                             self._active_job_id = None
-                        if cur_job.action_idx is None:
-                            raise RuntimeError("Engine search finished without a result")
                         return int(cur_job.action_idx)
                 except Exception as exc:
                     with self._lock:

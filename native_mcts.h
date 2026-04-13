@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include <pybind11/numpy.h>
@@ -27,6 +28,37 @@ struct NativeMCTSResult {
     pybind11::array_t<float> q_values_array() const;
     pybind11::array_t<int> leaf_depth_histogram_array() const;
     pybind11::array_t<int> resolved_depth_histogram_array() const;
+};
+
+class NativeMCTSSession {
+public:
+    ~NativeMCTSSession();
+
+    NativeMCTSSession(
+        const GameState& root_state,
+        pybind11::function evaluator,
+        int turns_taken,
+        float c_puct = 1.25f,
+        int temperature_moves = 10,
+        float temperature = 1.0f,
+        float eps = 1e-8f,
+        bool root_dirichlet_noise = false,
+        float root_dirichlet_epsilon = 0.25f,
+        float root_dirichlet_alpha_total = 10.0f,
+        int eval_batch_size = 32,
+        std::uint64_t rng_seed = 0,
+        bool use_forced_playouts = false,
+        float forced_playouts_k = 2.0f,
+        int forced_root_action_idx = -1
+    );
+
+    NativeMCTSResult advance(int num_simulations, int forced_root_action_idx = -1);
+    NativeMCTSResult snapshot() const;
+    int simulations_completed() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 // Note: search performs per-simulation root determinization by shuffling hidden

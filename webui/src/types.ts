@@ -1,6 +1,6 @@
 export type Seat = 'P0' | 'P1';
 export type JobStatus = 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED' | 'CANCELLED';
-export type SearchType = 'mcts' | 'mcts_gpu' | 'ismcts' | 'alphabeta' | 'forced_child';
+export type SearchType = 'mcts' | 'mcts_gpu' | 'mcts_bootstrap' | 'ismcts' | 'alphabeta' | 'forced_child';
 
 export interface CheckpointDTO {
   id: string;
@@ -192,6 +192,7 @@ export interface EngineThinkRequest {
   eval_batch_size?: number;
   alphabeta_depth?: number;
   forced_child_simulations_per_action?: number;
+  bootstrap_simulations_per_action?: number;
   forced_root_action_idx?: number;
 }
 

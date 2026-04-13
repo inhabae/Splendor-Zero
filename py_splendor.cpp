@@ -868,6 +868,42 @@ public:
         );
     }
 
+    std::unique_ptr<NativeMCTSSession> create_mcts_session(
+        py::function evaluator,
+        int turns_taken,
+        float c_puct = 1.25f,
+        int temperature_moves = 10,
+        float temperature = 1.0f,
+        float eps = 1e-8f,
+        bool root_dirichlet_noise = false,
+        float root_dirichlet_epsilon = 0.25f,
+        float root_dirichlet_alpha_total = 10.0f,
+        int eval_batch_size = 32,
+        std::uint64_t rng_seed = 0,
+        bool use_forced_playouts = false,
+        float forced_playouts_k = 2.0f,
+        int forced_root_action_idx = -1
+    ) const {
+        ensure_initialized();
+        return std::make_unique<NativeMCTSSession>(
+            state_,
+            std::move(evaluator),
+            turns_taken,
+            c_puct,
+            temperature_moves,
+            temperature,
+            eps,
+            root_dirichlet_noise,
+            root_dirichlet_epsilon,
+            root_dirichlet_alpha_total,
+            eval_batch_size,
+            rng_seed,
+            use_forced_playouts,
+            forced_playouts_k,
+            forced_root_action_idx
+        );
+    }
+
     NativeMCTSResult run_ismcts(
         py::function evaluator,
         int num_simulations = 64,
@@ -1261,6 +1297,16 @@ PYBIND11_MODULE(splendor_native, m) {
         .def_readonly("max_leaf_depth", &NativeMCTSResult::max_leaf_depth)
         .def_readonly("max_resolved_depth", &NativeMCTSResult::max_resolved_depth);
 
+    py::class_<NativeMCTSSession>(m, "NativeMCTSSession")
+        .def(
+            "advance",
+            &NativeMCTSSession::advance,
+            py::arg("num_simulations"),
+            py::arg("forced_root_action_idx") = -1
+        )
+        .def("snapshot", &NativeMCTSSession::snapshot)
+        .def_property_readonly("simulations_completed", &NativeMCTSSession::simulations_completed);
+
     py::class_<EndgameSolverResult>(m, "EndgameSolverResult")
         .def_readonly("best_action", &EndgameSolverResult::best_action)
         .def_readonly("value", &EndgameSolverResult::value)
@@ -1293,6 +1339,24 @@ PYBIND11_MODULE(splendor_native, m) {
             py::arg("evaluator"),
             py::arg("turns_taken"),
             py::arg("num_simulations") = 64,
+            py::arg("c_puct") = 1.25f,
+            py::arg("temperature_moves") = 10,
+            py::arg("temperature") = 1.0f,
+            py::arg("eps") = 1e-8f,
+            py::arg("root_dirichlet_noise") = false,
+            py::arg("root_dirichlet_epsilon") = 0.25f,
+            py::arg("root_dirichlet_alpha_total") = 10.0f,
+            py::arg("eval_batch_size") = 32,
+            py::arg("rng_seed") = static_cast<std::uint64_t>(0),
+            py::arg("use_forced_playouts") = false,
+            py::arg("forced_playouts_k") = 2.0f,
+            py::arg("forced_root_action_idx") = -1
+        )
+        .def(
+            "create_mcts_session",
+            &NativeEnv::create_mcts_session,
+            py::arg("evaluator"),
+            py::arg("turns_taken"),
             py::arg("c_puct") = 1.25f,
             py::arg("temperature_moves") = 10,
             py::arg("temperature") = 1.0f,

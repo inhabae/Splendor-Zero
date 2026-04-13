@@ -42,35 +42,8 @@ class MCTSResult:
     max_leaf_depth: int
     max_resolved_depth: int
 
-def run_mcts(
-    env: Any,
-    model: Any,
-    state: StepState,
-    *,
-    turns_taken: int,
-    device: str = "cpu",
-    config: MCTSConfig | None = None,
-    rng: random.Random | None = None,
-) -> MCTSResult:
-    cfg = config or MCTSConfig()
-    if bool(getattr(model, "training", False)):
-        model.eval()
 
-    if not isinstance(env, SplendorNativeEnv):
-        raise TypeError("run_mcts requires nn.native_env.SplendorNativeEnv (native-env-only implementation)")
-    if cfg.num_simulations <= 0:
-        raise ValueError("num_simulations must be positive")
-    if not (0.0 <= float(cfg.root_dirichlet_epsilon) <= 1.0):
-        raise ValueError("root_dirichlet_epsilon must be in [0,1]")
-    if float(cfg.root_dirichlet_alpha_total) <= 0.0:
-        raise ValueError("root_dirichlet_alpha_total must be positive")
-    if int(cfg.eval_batch_size) <= 0:
-        raise ValueError("eval_batch_size must be positive")
-    if float(cfg.forced_playouts_k) <= 0.0:
-        raise ValueError("forced_playouts_k must be positive")
-    if state.is_terminal:
-        raise ValueError("run_mcts called on terminal state")
-
+def _build_evaluator(model: Any, *, device: str):
     def evaluator(states_np: np.ndarray, masks_np: np.ndarray):
         import torch
 
@@ -110,8 +83,125 @@ def run_mcts(
             raise ValueError("Model returned non-finite values")
         return policy_scores, values
 
+    return evaluator
+
+
+def _native_result_to_mcts_result(native_result: Any) -> MCTSResult:
+    visit_probs = np.asarray(native_result.visit_probs, dtype=np.float32)
+    if visit_probs.shape != (ACTION_DIM,):
+        raise RuntimeError(f"Unexpected native visit_probs shape {visit_probs.shape}")
+    q_values = np.asarray(native_result.q_values, dtype=np.float32)
+    if q_values.shape != (ACTION_DIM,):
+        raise RuntimeError(f"Unexpected native q_values shape {q_values.shape}")
+
+    return MCTSResult(
+        chosen_action_idx=int(native_result.chosen_action_idx),
+        visit_probs=visit_probs,
+        raw_visit_probs=np.asarray(getattr(native_result, "raw_visit_probs", visit_probs), dtype=np.float32).copy(),
+        q_values=q_values,
+        root_best_value=float(native_result.root_best_value),
+        search_slots_requested=int(native_result.search_slots_requested),
+        search_slots_evaluated=int(native_result.search_slots_evaluated),
+        search_slots_drop_pending_eval=int(getattr(native_result, "search_slots_drop_pending_eval", 0)),
+        search_slots_drop_no_action=int(getattr(native_result, "search_slots_drop_no_action", 0)),
+        leaf_depth_histogram=np.asarray(getattr(native_result, "leaf_depth_histogram", ()), dtype=np.int32).copy(),
+        resolved_depth_histogram=np.asarray(getattr(native_result, "resolved_depth_histogram", ()), dtype=np.int32).copy(),
+        max_leaf_depth=int(getattr(native_result, "max_leaf_depth", 0)),
+        max_resolved_depth=int(getattr(native_result, "max_resolved_depth", 0)),
+    )
+
+
+class NativeMCTSSession:
+    def __init__(self, native_session: Any):
+        self._native_session = native_session
+
+    def advance(self, num_simulations: int, forced_root_action_idx: int | None = None) -> MCTSResult:
+        native_result = self._native_session.advance(
+            int(num_simulations),
+            -1 if forced_root_action_idx is None else int(forced_root_action_idx),
+        )
+        return _native_result_to_mcts_result(native_result)
+
+    def snapshot(self) -> MCTSResult:
+        return _native_result_to_mcts_result(self._native_session.snapshot())
+
+    @property
+    def simulations_completed(self) -> int:
+        return int(self._native_session.simulations_completed)
+
+
+def create_mcts_session(
+    env: Any,
+    model: Any,
+    state: StepState,
+    *,
+    turns_taken: int,
+    device: str = "cpu",
+    config: MCTSConfig | None = None,
+    rng: random.Random | None = None,
+) -> NativeMCTSSession:
+    cfg = config or MCTSConfig()
+    if bool(getattr(model, "training", False)):
+        model.eval()
+
+    if not isinstance(env, SplendorNativeEnv):
+        raise TypeError("create_mcts_session requires nn.native_env.SplendorNativeEnv (native-env-only implementation)")
+    if state.is_terminal:
+        raise ValueError("create_mcts_session called on terminal state")
+
     py_rng = rng if rng is not None else random
     rng_seed = int(py_rng.getrandbits(64))
+    evaluator = _build_evaluator(model, device=device)
+    native_session = env.create_mcts_session(
+        evaluator=evaluator,
+        turns_taken=int(turns_taken),
+        c_puct=float(cfg.c_puct),
+        temperature_moves=int(cfg.temperature_moves),
+        temperature=float(cfg.temperature),
+        eps=float(cfg.eps),
+        root_dirichlet_noise=bool(cfg.root_dirichlet_noise),
+        root_dirichlet_epsilon=float(cfg.root_dirichlet_epsilon),
+        root_dirichlet_alpha_total=float(cfg.root_dirichlet_alpha_total),
+        eval_batch_size=int(cfg.eval_batch_size),
+        rng_seed=rng_seed,
+        use_forced_playouts=bool(cfg.use_forced_playouts),
+        forced_playouts_k=float(cfg.forced_playouts_k),
+        forced_root_action_idx=(int(cfg.forced_root_action_idx) if cfg.forced_root_action_idx is not None else -1),
+    )
+    return NativeMCTSSession(native_session)
+
+def run_mcts(
+    env: Any,
+    model: Any,
+    state: StepState,
+    *,
+    turns_taken: int,
+    device: str = "cpu",
+    config: MCTSConfig | None = None,
+    rng: random.Random | None = None,
+) -> MCTSResult:
+    cfg = config or MCTSConfig()
+    if bool(getattr(model, "training", False)):
+        model.eval()
+
+    if not isinstance(env, SplendorNativeEnv):
+        raise TypeError("run_mcts requires nn.native_env.SplendorNativeEnv (native-env-only implementation)")
+    if cfg.num_simulations <= 0:
+        raise ValueError("num_simulations must be positive")
+    if not (0.0 <= float(cfg.root_dirichlet_epsilon) <= 1.0):
+        raise ValueError("root_dirichlet_epsilon must be in [0,1]")
+    if float(cfg.root_dirichlet_alpha_total) <= 0.0:
+        raise ValueError("root_dirichlet_alpha_total must be positive")
+    if int(cfg.eval_batch_size) <= 0:
+        raise ValueError("eval_batch_size must be positive")
+    if float(cfg.forced_playouts_k) <= 0.0:
+        raise ValueError("forced_playouts_k must be positive")
+    if state.is_terminal:
+        raise ValueError("run_mcts called on terminal state")
+
+    py_rng = rng if rng is not None else random
+    rng_seed = int(py_rng.getrandbits(64))
+    evaluator = _build_evaluator(model, device=device)
 
     native_kwargs = dict(
         evaluator=evaluator,
@@ -135,26 +225,4 @@ def run_mcts(
         **native_kwargs,
         root_dirichlet_alpha_total=float(cfg.root_dirichlet_alpha_total),
     )
-
-    visit_probs = np.asarray(native_result.visit_probs, dtype=np.float32)
-    if visit_probs.shape != (ACTION_DIM,):
-        raise RuntimeError(f"Unexpected native visit_probs shape {visit_probs.shape}")
-    q_values = np.asarray(native_result.q_values, dtype=np.float32)
-    if q_values.shape != (ACTION_DIM,):
-        raise RuntimeError(f"Unexpected native q_values shape {q_values.shape}")
-
-    return MCTSResult(
-        chosen_action_idx=int(native_result.chosen_action_idx),
-        visit_probs=visit_probs,
-        raw_visit_probs=np.asarray(getattr(native_result, "raw_visit_probs", visit_probs), dtype=np.float32).copy(),
-        q_values=q_values,
-        root_best_value=float(native_result.root_best_value),
-        search_slots_requested=int(native_result.search_slots_requested),
-        search_slots_evaluated=int(native_result.search_slots_evaluated),
-        search_slots_drop_pending_eval=int(getattr(native_result, "search_slots_drop_pending_eval", 0)),
-        search_slots_drop_no_action=int(getattr(native_result, "search_slots_drop_no_action", 0)),
-        leaf_depth_histogram=np.asarray(getattr(native_result, "leaf_depth_histogram", ()), dtype=np.int32).copy(),
-        resolved_depth_histogram=np.asarray(getattr(native_result, "resolved_depth_histogram", ()), dtype=np.int32).copy(),
-        max_leaf_depth=int(getattr(native_result, "max_leaf_depth", 0)),
-        max_resolved_depth=int(getattr(native_result, "max_resolved_depth", 0)),
-    )
+    return _native_result_to_mcts_result(native_result)
