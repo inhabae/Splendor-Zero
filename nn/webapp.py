@@ -261,9 +261,10 @@ class JumpToSnapshotRequest(BaseModel):
 
 class EngineThinkRequest(BaseModel):
     num_simulations: int | None = Field(default=None, ge=1, le=500000)
-    search_type: Literal["mcts", "ismcts", "alphabeta", "forced_child"] = "mcts"
+    search_type: Literal["mcts", "mcts_gpu", "ismcts", "alphabeta", "forced_child"] = "mcts"
     continuous_until_cancel: bool = False
     max_total_simulations: int | None = Field(default=None, ge=1, le=500000)
+    eval_batch_size: int | None = Field(default=None, ge=1, le=1024)
     forced_root_action_idx: int | None = Field(default=None, ge=0, lt=ACTION_DIM)
     alphabeta_depth: int | None = Field(default=None, ge=1, le=64)
     forced_child_simulations_per_action: int | None = Field(default=None, ge=1, le=500000)
@@ -303,7 +304,7 @@ class RevealCardResponse(BaseModel):
 
 class EngineResultDTO(BaseModel):
     action_idx: int
-    search_type: Literal["mcts", "ismcts", "alphabeta", "forced_child"] = "mcts"
+    search_type: Literal["mcts", "mcts_gpu", "ismcts", "alphabeta", "forced_child"] = "mcts"
     action_details: list[ActionVizDTO] = Field(default_factory=list)
     model_action_details: list[ActionVizDTO] | None = None
     root_value: float | None = None
@@ -489,7 +490,7 @@ class EngineJob:
     root_value: float | None = None
     selected_action_q: float | None = None
     total_simulations: int = 0
-    search_type: Literal["mcts", "ismcts", "alphabeta", "forced_child"] = "mcts"
+    search_type: Literal["mcts", "mcts_gpu", "ismcts", "alphabeta", "forced_child"] = "mcts"
     forced_root_action_idx: int | None = None
 
 
@@ -2785,14 +2786,19 @@ class GameManager:
                 if req is not None and req.alphabeta_depth is not None
                 else 3
             )
+            eval_batch_size = (
+                int(req.eval_batch_size)
+                if req is not None and req.eval_batch_size is not None
+                else 32
+            )
             forced_child_simulations_per_action = (
                 int(req.forced_child_simulations_per_action)
                 if req is not None and req.forced_child_simulations_per_action is not None
                 else num_simulations
             )
-            normalized_search_type = search_type if search_type in ("mcts", "ismcts", "alphabeta", "forced_child") else "mcts"
+            normalized_search_type = search_type if search_type in ("mcts", "mcts_gpu", "ismcts", "alphabeta", "forced_child") else "mcts"
 
-            if continuous_until_cancel and normalized_search_type not in ("mcts", "ismcts"):
+            if continuous_until_cancel and normalized_search_type not in ("mcts", "mcts_gpu", "ismcts"):
                 raise HTTPException(status_code=400, detail=f"{normalized_search_type} does not support continuous mode")
 
             job = EngineJob(
@@ -2853,7 +2859,7 @@ class GameManager:
                     deterministic_q_values: np.ndarray | None = None
                     import time
                     start_time = time.time()
-                    if normalized_search_type == "mcts":
+                    if normalized_search_type in ("mcts", "mcts_gpu"):
                         result = run_mcts(
                             search_env,
                             model,
@@ -2866,6 +2872,7 @@ class GameManager:
                                 temperature_moves=0,
                                 temperature=0.0,
                                 root_dirichlet_noise=False,
+                                eval_batch_size=eval_batch_size if normalized_search_type == "mcts_gpu" else 1,
                                 use_forced_playouts=False,
                                 forced_root_action_idx=forced_root_action_idx,
                             ),

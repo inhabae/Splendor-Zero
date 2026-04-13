@@ -65,6 +65,7 @@ class SpendeeBridgeConfig:
     num_simulations: int = 5000
     determinization_samples: int = 1
     gpu_batching_enabled: bool = False
+    eval_batch_size: int | None = None
     alphabeta_depth: int = 3
     alphabeta_chance_samples: int = 4
     forced_child_simulations: int = 2000
@@ -107,6 +108,9 @@ def is_actionable_turn(observed: ObservedBoardState, player_seat: str | None) ->
 class SpendeeBridgeRunner:
     def __init__(self, config: SpendeeBridgeConfig) -> None:
         self.config = config
+        eval_batch_size = int(config.eval_batch_size) if config.eval_batch_size is not None else (
+            32 if config.gpu_batching_enabled else 1
+        )
         self.catalog = SpendeeCatalog.load()
         self.observer = SpendeeObserver(self.catalog, selectors=config.selectors)
         self.shadow = ShadowState(self.catalog, player_seat=config.player_seat or "")
@@ -119,6 +123,7 @@ class SpendeeBridgeRunner:
                 temperature_moves=0,
                 temperature=0.0,
                 root_dirichlet_noise=False,
+                eval_batch_size=eval_batch_size,
             ),
             determinization_samples=config.determinization_samples,
             search_type=config.search_type,
@@ -130,7 +135,7 @@ class SpendeeBridgeRunner:
             forced_child_config=ForcedChildSearchConfig(
                 simulations_per_child=config.forced_child_simulations,
                 c_puct=config.forced_child_c_puct,
-                eval_batch_size=32 if config.gpu_batching_enabled else 1,
+                eval_batch_size=eval_batch_size,
             ),
         )
         self._last_action_idx: int | None = None

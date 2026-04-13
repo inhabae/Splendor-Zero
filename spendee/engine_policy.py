@@ -665,7 +665,7 @@ class DeterminizedMCTSPolicy:
                 root_dirichlet_noise=bool(self.mcts_config.root_dirichlet_noise),
                 root_dirichlet_epsilon=float(self.mcts_config.root_dirichlet_epsilon),
                 root_dirichlet_alpha_total=float(self.mcts_config.root_dirichlet_alpha_total),
-                eval_batch_size=(32 if self.gpu_batching_enabled else 1),
+                eval_batch_size=int(self.mcts_config.eval_batch_size),
                 use_forced_playouts=bool(self.mcts_config.use_forced_playouts),
                 forced_playouts_k=float(self.mcts_config.forced_playouts_k),
             )
@@ -701,7 +701,7 @@ class DeterminizedMCTSPolicy:
             )
 
         if self.search_type == "ismcts":
-            eval_batch_size = 32 if self.gpu_batching_enabled else 1
+            eval_batch_size = int(self.mcts_config.eval_batch_size)
             try:
                 return run_ismcts(
                     env,

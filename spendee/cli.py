@@ -37,6 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable GPU batching for MCTS/ISMCTS (eval_batch_size=32 instead of 1)",
     )
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=None,
+        help="Explicit leaf evaluation batch size for MCTS/ISMCTS; overrides --gpu-batching-enabled when set",
+    )
     # --- Alpha-Beta options (only used when --search-type alphabeta) ---
     parser.add_argument(
         "--alphabeta-depth",
@@ -117,6 +123,9 @@ def _resolve_bridge_mode(args: argparse.Namespace) -> tuple[bool, bool]:
 
 async def _run_async(args: argparse.Namespace) -> None:
     dry_run, observe_only = _resolve_bridge_mode(args)
+    eval_batch_size = None if args.eval_batch_size is None else int(args.eval_batch_size)
+    if eval_batch_size is not None and eval_batch_size <= 0:
+        raise ValueError("--eval-batch-size must be positive")
     config = SpendeeBridgeConfig(
         start_url=str(args.start_url),
         user_data_dir=str(args.user_data_dir),
@@ -126,6 +135,7 @@ async def _run_async(args: argparse.Namespace) -> None:
         num_simulations=int(args.num_simulations),
         determinization_samples=int(args.determinization_samples),
         gpu_batching_enabled=bool(args.gpu_batching_enabled),
+        eval_batch_size=eval_batch_size,
         alphabeta_depth=int(args.alphabeta_depth),
         alphabeta_chance_samples=int(args.alphabeta_chance_samples),
         forced_child_simulations=int(args.forced_child_simulations),
