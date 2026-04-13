@@ -2943,16 +2943,39 @@ class GameManager:
                     deterministic_q_values: np.ndarray | None = None
                     start_time = time.time()
                     if normalized_search_type in ("mcts", "mcts_gpu", "mcts_bootstrap"):
-                        mcts_config = MCTSConfig(
-                            num_simulations=search_budget,
-                            c_puct=1.25,
-                            temperature_moves=0,
-                            temperature=0.0,
-                            root_dirichlet_noise=False,
-                            eval_batch_size=eval_batch_size if normalized_search_type in ("mcts_gpu", "mcts_bootstrap") else 1,
-                            use_forced_playouts=False,
-                            forced_root_action_idx=forced_root_action_idx,
-                        )
+                        # For bootstrap mode we want the user-provided `num_simulations`
+                        # to apply only to the latter MCTS phase. The per-action
+                        # bootstrap searches are counted separately and added to the
+                        # session target so they don't consume the `num_simulations`.
+                        if normalized_search_type == "mcts_bootstrap":
+                            legal_root_actions = [int(action) for action in np.flatnonzero(np.asarray(search_step.mask, dtype=bool))]
+                            if forced_root_action_idx is not None:
+                                legal_root_actions = [int(forced_root_action_idx)]
+                            total_bootstrap_requested = bootstrap_simulations_per_action * len(legal_root_actions)
+                            bootstrap_total_budget = int(total_bootstrap_requested) if total_bootstrap_requested > 0 else 0
+                            # session target is bootstrap budget + latter search_budget
+                            session_target = int(search_budget) + int(bootstrap_total_budget)
+                            mcts_config = MCTSConfig(
+                                num_simulations=session_target,
+                                c_puct=1.25,
+                                temperature_moves=0,
+                                temperature=0.0,
+                                root_dirichlet_noise=False,
+                                eval_batch_size=eval_batch_size if normalized_search_type in ("mcts_gpu", "mcts_bootstrap") else 1,
+                                use_forced_playouts=False,
+                                forced_root_action_idx=forced_root_action_idx,
+                            )
+                        else:
+                            mcts_config = MCTSConfig(
+                                num_simulations=search_budget,
+                                c_puct=1.25,
+                                temperature_moves=0,
+                                temperature=0.0,
+                                root_dirichlet_noise=False,
+                                eval_batch_size=eval_batch_size if normalized_search_type in ("mcts_gpu", "mcts_bootstrap") else 1,
+                                use_forced_playouts=False,
+                                forced_root_action_idx=forced_root_action_idx,
+                            )
                         if normalized_search_type == "mcts_bootstrap":
                             session = create_mcts_session(
                                 search_env,
@@ -2964,38 +2987,42 @@ class GameManager:
                                 rng=search_rng,
                             )
                             result = None
-                            legal_root_actions = [int(action) for action in np.flatnonzero(np.asarray(search_step.mask, dtype=bool))]
-                            if forced_root_action_idx is not None:
-                                legal_root_actions = [int(forced_root_action_idx)]
-                            total_bootstrap_requested = bootstrap_simulations_per_action * len(legal_root_actions)
-                            bootstrap_total_budget = min(search_budget, total_bootstrap_requested)
-                            bootstrap_budgets = _split_bootstrap_budget(bootstrap_total_budget, len(legal_root_actions))
-                            for action_idx, action_budget in zip(legal_root_actions, bootstrap_budgets):
-                                if action_budget <= 0:
-                                    continue
-                                with self._lock:
-                                    _require_active_job_locked()
-                                result = session.advance(int(action_budget), forced_root_action_idx=int(action_idx))
-                                total_simulations = int(session.simulations_completed)
-                                if continuous_until_cancel:
-                                    _publish_tree_result(result, total_sims=total_simulations, finalize=False)
-                            sims_left = int(search_budget) - int(session.simulations_completed)
-                            if sims_left > 0:
-                                if continuous_until_cancel:
-                                    chunk_size = max(1, int(num_simulations))
-                                    while session.simulations_completed < search_budget:
-                                        with self._lock:
-                                            _require_active_job_locked()
-                                        sims_left = int(search_budget) - int(session.simulations_completed)
-                                        result = session.advance(min(chunk_size, sims_left))
-                                        total_simulations = int(session.simulations_completed)
-                                        _publish_tree_result(result, total_sims=total_simulations, finalize=False)
-                                else:
-                                    result = session.advance(int(sims_left))
-                                    total_simulations = int(session.simulations_completed)
-                            elif result is None:
+                            if bootstrap_total_budget <= 0:
+                                # Nothing to bootstrap; snapshot current session state
                                 result = session.snapshot()
                                 total_simulations = int(session.simulations_completed)
+                            else:
+                                # allocate bootstrap budgets per legal root action
+                                bootstrap_budgets = _split_bootstrap_budget(int(bootstrap_total_budget), len(legal_root_actions))
+                                for action_idx, action_budget in zip(legal_root_actions, bootstrap_budgets):
+                                    if action_budget <= 0:
+                                        continue
+                                    with self._lock:
+                                        _require_active_job_locked()
+                                    result = session.advance(int(action_budget), forced_root_action_idx=int(action_idx))
+                                    total_simulations = int(session.simulations_completed)
+                                    if continuous_until_cancel:
+                                        _publish_tree_result(result, total_sims=total_simulations, finalize=False)
+                                # After bootstrap phase, run the latter MCTS phase whose
+                                # budget is `search_budget` (user num_simulations).
+                                total_target = int(bootstrap_total_budget) + int(search_budget)
+                                sims_left = int(total_target) - int(session.simulations_completed)
+                                if sims_left > 0:
+                                    if continuous_until_cancel:
+                                        chunk_size = max(1, int(num_simulations))
+                                        while session.simulations_completed < total_target:
+                                            with self._lock:
+                                                _require_active_job_locked()
+                                            sims_left = int(total_target) - int(session.simulations_completed)
+                                            result = session.advance(min(chunk_size, sims_left))
+                                            total_simulations = int(session.simulations_completed)
+                                            _publish_tree_result(result, total_sims=total_simulations, finalize=False)
+                                    else:
+                                        result = session.advance(int(sims_left))
+                                        total_simulations = int(session.simulations_completed)
+                                elif result is None:
+                                    result = session.snapshot()
+                                    total_simulations = int(session.simulations_completed)
                         elif continuous_until_cancel:
                             session = create_mcts_session(
                                 search_env,
