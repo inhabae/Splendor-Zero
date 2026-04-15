@@ -841,13 +841,31 @@ class DeterminizedMCTSPolicy:
         )
 
     def choose_action(self, shadow: ShadowState, *, rng: random.Random | None = None) -> DeterminizedPolicyResult:
+        from collections import Counter
+        
         random_source = rng or random.Random()
-        payload = build_root_determinized_payload(shadow, rng=random_source)
-        return self._choose_action_from_payload(
-            payload,
-            turns_taken=int(payload.get("move_number", 0)),
-            rng=random_source,
-        )
+        num_votes = 3
+        results = []
+        
+        for _ in range(num_votes):
+            payload = build_root_determinized_payload(shadow, rng=random_source)
+            res = self._choose_action_from_payload(
+                payload,
+                turns_taken=int(payload.get("move_number", 0)),
+                rng=random_source,
+            )
+            results.append(res)
+            
+        # Count the frequency of each chosen action index
+        action_counts = Counter(r.action_idx for r in results)
+        best_action, _ = action_counts.most_common(1)[0]
+        
+        # Return a result payload corresponding to the most frequent action
+        for r in results:
+            if r.action_idx == best_action:
+                return r
+                
+        return results[0]
 
     def choose_return_actions(
         self,
@@ -855,49 +873,68 @@ class DeterminizedMCTSPolicy:
         *,
         rng: random.Random | None = None,
     ) -> tuple[DeterminizedPolicyResult, list[int]]:
+        from collections import Counter
+
         random_source = rng or random.Random()
-        payload = build_root_determinized_payload(shadow, rng=random_source)
-        turns_taken = int(payload.get("move_number", 0))
-        chosen: list[int] = []
-        first_result: DeterminizedPolicyResult | None = None
+        num_votes = 3
+        all_results: list[tuple[DeterminizedPolicyResult, tuple[int, ...]]] = []
+        
+        for _ in range(num_votes):
+            payload = build_root_determinized_payload(shadow, rng=random_source)
+            turns_taken = int(payload.get("move_number", 0))
+            chosen: list[int] = []
+            first_result: DeterminizedPolicyResult | None = None
 
-        with SplendorNativeEnv() as env:
-            state = env.load_state(payload)
-            while True:
-                exported = env.export_state()
-                phase_flags = dict(exported.get("phase_flags", {}))
-                if not bool(phase_flags.get("is_return_phase")):
-                    break
+            with SplendorNativeEnv() as env:
+                state = env.load_state(payload)
+                while True:
+                    exported = env.export_state()
+                    phase_flags = dict(exported.get("phase_flags", {}))
+                    if not bool(phase_flags.get("is_return_phase")):
+                        break
 
-                result = self._run_search(env, state, turns_taken=turns_taken, rng=random_source)
+                    result = self._run_search(env, state, turns_taken=turns_taken, rng=random_source)
 
-                if isinstance(result, DeterminizedPolicyResult):
-                    visit_probs = result.visit_probs
-                    action_idx = result.action_idx
-                    root_best_value = result.root_best_value_mean
-                    q_values = result.q_values
-                else:
-                    visit_probs = np.asarray(result.visit_probs, dtype=np.float32)
-                    action_idx = int(np.argmax(visit_probs))
-                    root_best_value = float(result.root_best_value)
-                    q_values = np.asarray(result.q_values, dtype=np.float32)
+                    if isinstance(result, DeterminizedPolicyResult):
+                        visit_probs = result.visit_probs
+                        action_idx = result.action_idx
+                        root_best_value = result.root_best_value_mean
+                        q_values = result.q_values
+                    else:
+                        visit_probs = np.asarray(result.visit_probs, dtype=np.float32)
+                        action_idx = int(np.argmax(visit_probs))
+                        root_best_value = float(result.root_best_value)
+                        q_values = np.asarray(result.q_values, dtype=np.float32)
 
-                if action_idx < 61 or action_idx > 65:
-                    raise RuntimeError(f"Expected return-phase action in [61, 65], got {action_idx}")
+                    if action_idx < 61 or action_idx > 65:
+                        raise RuntimeError(f"Expected return-phase action in [61, 65], got {action_idx}")
 
-                current_result = DeterminizedPolicyResult(
-                    action_idx=action_idx,
-                    visit_probs=np.asarray(visit_probs, dtype=np.float32),
-                    root_best_value_mean=root_best_value,
-                    num_determinizations=1,
-                    q_values=q_values,
-                )
-                if first_result is None:
-                    first_result = current_result
-                chosen.append(action_idx)
-                state = env.step(action_idx)
-                turns_taken += 1
+                    current_result = DeterminizedPolicyResult(
+                        action_idx=action_idx,
+                        visit_probs=np.asarray(visit_probs, dtype=np.float32),
+                        root_best_value_mean=root_best_value,
+                        num_determinizations=1,
+                        q_values=q_values,
+                    )
+                    if first_result is None:
+                        first_result = current_result
+                    chosen.append(action_idx)
+                    state = env.step(action_idx)
+                    turns_taken += 1
 
-        if first_result is None:
+            if first_result is not None:
+                all_results.append((first_result, tuple(chosen)))
+
+        if not all_results:
             raise RuntimeError("Return phase produced no return actions")
-        return first_result, chosen
+            
+        # Count the frequency of the generated return sequences and select the most common sequence
+        sequence_counts = Counter(seq for _, seq in all_results)
+        best_sequence, _ = sequence_counts.most_common(1)[0]
+        
+        # Return the result and sequence corresponding to the most frequent combination
+        for res, seq in all_results:
+            if seq == best_sequence:
+                return res, list(seq)
+                
+        return all_results[0][0], list(all_results[0][1])
