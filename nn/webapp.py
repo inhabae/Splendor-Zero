@@ -61,7 +61,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_DIR = REPO_ROOT / "nn_artifacts" / "checkpoints"
 SELFPLAY_DIR = REPO_ROOT / "nn_artifacts" / "selfplay"
 WEB_DIST_DIR = REPO_ROOT / "webui" / "dist"
-SPENDEE_LIVE_SAVE_PATH = REPO_ROOT / "nn_artifacts" / "spendee_bridge" / "webui_save.json"
+_DEFAULT_SPENDEE_LIVE_SAVE_PATH = REPO_ROOT / "nn_artifacts" / "spendee_bridge" / "webui_save.json"
+SPENDEE_LIVE_SAVE_PATH = Path(os.environ.get("SPENDEE_LIVE_SAVE_PATH", str(_DEFAULT_SPENDEE_LIVE_SAVE_PATH))).expanduser()
 _STANDARD_CARD_TIER_BY_ID = {
     int(card["id"]): int(card["tier"])
     for card in list_standard_cards()
@@ -260,15 +261,15 @@ class JumpToSnapshotRequest(BaseModel):
 
 
 class EngineThinkRequest(BaseModel):
-    num_simulations: int | None = Field(default=None, ge=1, le=50000000)
+    num_simulations: int | None = Field(default=None, ge=1, le=400000)
     search_type: Literal["mcts", "mcts_gpu", "mcts_bootstrap", "ismcts", "alphabeta", "forced_child"] = "mcts"
     continuous_until_cancel: bool = False
-    max_total_simulations: int | None = Field(default=None, ge=1, le=50000000)
+    max_total_simulations: int | None = Field(default=None, ge=1, le=400000)
     eval_batch_size: int | None = Field(default=None, ge=1, le=1024)
     forced_root_action_idx: int | None = Field(default=None, ge=0, lt=ACTION_DIM)
     alphabeta_depth: int | None = Field(default=None, ge=1, le=64)
-    forced_child_simulations_per_action: int | None = Field(default=None, ge=1, le=50000000)
-    bootstrap_simulations_per_action: int | None = Field(default=None, ge=1, le=50000000)
+    forced_child_simulations_per_action: int | None = Field(default=None, ge=1, le=400000)
+    bootstrap_simulations_per_action: int | None = Field(default=None, ge=1, le=400000)
 
 
 class RevealCardRequest(BaseModel):

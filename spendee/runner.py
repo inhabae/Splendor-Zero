@@ -11,7 +11,7 @@ from typing import Literal
 from nn.mcts import MCTSConfig
 
 from .catalog import SpendeeCatalog
-from .engine_policy import AlphaBetaConfig, DeterminizedMCTSPolicy, ForcedChildSearchConfig
+from .engine_policy import AlphaBetaConfig, BootstrapMCTSConfig, DeterminizedMCTSPolicy, ForcedChildSearchConfig
 from .executor import SpendeeExecutor
 from .logging import BridgeArtifactLogger
 from .observer import ObservedBoardState, SpendeeObserver
@@ -58,10 +58,12 @@ PAGE_SURFACE_PROBE = """
 @dataclass
 class SpendeeBridgeConfig:
     start_url: str
-    user_data_dir: str
+    user_data_dir: str | None
     checkpoint_path: str
+    remote_ws_url: str | None = None
+    remote_cdp_url: str | None = None
     player_seat: str | None = None
-    search_type: Literal["mcts", "ismcts", "alphabeta", "forced_child"] = "mcts"
+    search_type: Literal["mcts", "mcts_bootstrap", "ismcts", "alphabeta", "forced_child"] = "mcts"
     num_simulations: int = 5000
     determinization_samples: int = 1
     gpu_batching_enabled: bool = False
@@ -70,6 +72,7 @@ class SpendeeBridgeConfig:
     alphabeta_chance_samples: int = 4
     forced_child_simulations: int = 2000
     forced_child_c_puct: float = 1.25
+    bootstrap_simulations_per_action: int = 0
     poll_interval_sec: float = 0.5
     stable_polls: int = 2
     stable_board_timeout_sec: float = 8.0
@@ -135,6 +138,10 @@ class SpendeeBridgeRunner:
             forced_child_config=ForcedChildSearchConfig(
                 simulations_per_child=config.forced_child_simulations,
                 c_puct=config.forced_child_c_puct,
+                eval_batch_size=eval_batch_size,
+            ),
+            bootstrap_config=BootstrapMCTSConfig(
+                bootstrap_simulations_per_action=config.bootstrap_simulations_per_action,
                 eval_batch_size=eval_batch_size,
             ),
         )
@@ -1548,16 +1555,37 @@ class SpendeeBridgeRunner:
         return None
 
     async def run(self) -> None:
-        try:
-            from playwright.async_api import async_playwright
-        except Exception as exc:  # pragma: no cover
-            raise RuntimeError("playwright is required to run the Spendee bridge") from exc
+        from playwright.async_api import async_playwright
 
-        async with async_playwright() as playwright:
-            context = await playwright.chromium.launch_persistent_context(
-                user_data_dir=self.config.user_data_dir,
-                headless=False,
-            )
+        async with async_playwright() as p:
+            context = None
+            close_context = False
+            if self.config.remote_ws_url:
+                self._write_status(stage="connecting_remote", extra={"mode": "playwright"})
+                browser = await p.chromium.connect(ws_endpoint=self.config.remote_ws_url)
+                existing_contexts = list(browser.contexts)
+                if existing_contexts:
+                    context = existing_contexts[0]
+                else:
+                    context = await browser.new_context()
+                    close_context = True
+            elif self.config.remote_cdp_url:
+                self._write_status(stage="connecting_remote", extra={"mode": "cdp"})
+                browser = await p.chromium.connect_over_cdp(self.config.remote_cdp_url)
+                existing_contexts = list(browser.contexts)
+                if existing_contexts:
+                    context = existing_contexts[0]
+                else:
+                    context = await browser.new_context()
+                    close_context = True
+            else:
+                if not self.config.user_data_dir:
+                    raise RuntimeError("user_data_dir is required when no remote browser endpoint is configured")
+                context = await p.chromium.launch_persistent_context(
+                    user_data_dir=self.config.user_data_dir,
+                    headless=False,
+                )
+                close_context = True
             try:
                 page = await self._find_active_game_page(context)
                 if page is None:
@@ -1929,12 +1957,13 @@ class SpendeeBridgeRunner:
                             self._last_action_idx = decision.action_idx
                     await asyncio.sleep(self.config.poll_interval_sec)
             finally:
-                try:
-                    await context.close()
-                except Exception as exc:
-                    # The driver can already be gone if Chromium exited unexpectedly.
-                    # Treat close as best-effort to avoid masking the real runtime outcome.
+                if close_context and context is not None:
                     try:
-                        self._write_status(stage="context_close_failed", extra={"error": str(exc)})
-                    except Exception:
-                        pass
+                        await context.close()
+                    except Exception as exc:
+                        # The driver can already be gone if Chromium exited unexpectedly.
+                        # Treat close as best-effort to avoid masking the real runtime outcome.
+                        try:
+                            self._write_status(stage="context_close_failed", extra={"error": str(exc)})
+                        except Exception:
+                            pass

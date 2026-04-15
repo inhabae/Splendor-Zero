@@ -34,7 +34,7 @@ const COLOR_ORDER: CatalogCardDTO['bonus_color'][] = ['white', 'blue', 'green', 
 
 const POLL_MS = 400;
 const LIVE_POLL_MS = 1000;
-const LIVE_SEARCH_MAX_SIMULATIONS = 50_000_000;
+const LIVE_SEARCH_MAX_SIMULATIONS = 400000;
 const DEFAULT_DEEP_ANALYSIS_SIMULATIONS = 50_000;
 const DEFAULT_GPU_EVAL_BATCH_SIZE = 32;
 const MAX_EVAL_BATCH_SIZE = 1024;
@@ -926,7 +926,9 @@ const displayedP0EvalRef = useRef<number | null>(null);
       search_type: activeSearchType,
       continuous_until_cancel: useProgressiveSearch,
       max_total_simulations: useProgressiveSearch ? totalSearchBudget : nextNumSimulations,
-      ...(activeSearchType === 'mcts_gpu' ? { eval_batch_size: nextEvalBatchSize } : {}),
+      ...((activeSearchType === 'mcts_gpu' || activeSearchType === 'mcts_bootstrap')
+        ? { eval_batch_size: nextEvalBatchSize }
+        : {}),
       ...(activeSearchType === 'mcts_bootstrap'
         ? { bootstrap_simulations_per_action: nextBootstrapSimulationsPerAction }
         : {}),

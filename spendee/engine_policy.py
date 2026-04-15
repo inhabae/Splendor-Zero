@@ -10,7 +10,7 @@ import numpy as np
 
 from nn.checkpoints import load_checkpoint
 from nn.ismcts import ISMCTSConfig, run_ismcts
-from nn.mcts import MCTSConfig, run_mcts
+from nn.mcts import MCTSConfig, create_mcts_session, run_mcts
 from nn.native_env import SplendorNativeEnv
 
 from .determinize import build_root_determinized_payload
@@ -401,6 +401,12 @@ class ForcedChildSearchConfig:
     eval_batch_size: int = 1
 
 
+@dataclass
+class BootstrapMCTSConfig:
+    bootstrap_simulations_per_action: int = 0
+    eval_batch_size: int = 1
+
+
 _RETURN_ACTION_LO = 61
 _RETURN_ACTION_HI = 65
 _NOBLE_ACTION_LO = 66
@@ -500,6 +506,16 @@ def _split_forced_child_budget(total_budget: int, num_states: int) -> list[int]:
         remainder = total_budget % num_states
         return [base + (1 if idx < remainder else 0) for idx in range(num_states)]
     return [1 if idx < total_budget else 0 for idx in range(num_states)]
+
+
+def _split_bootstrap_budget(total_budget: int, num_actions: int) -> list[int]:
+    if num_actions <= 0:
+        return []
+    if total_budget <= 0:
+        return [0] * num_actions
+    base = total_budget // num_actions
+    remainder = total_budget % num_actions
+    return [base + (1 if idx < remainder else 0) for idx in range(num_actions)]
 
 
 def run_forced_child_search(
@@ -629,6 +645,67 @@ def run_forced_child_search(
     )
 
 
+def run_bootstrap_mcts_search(
+    env: SplendorNativeEnv,
+    model,
+    state,
+    *,
+    turns_taken: int,
+    device: str = "cpu",
+    mcts_config: MCTSConfig,
+    bootstrap_config: BootstrapMCTSConfig | None = None,
+    rng: random.Random | None = None,
+) -> DeterminizedPolicyResult:
+    cfg = bootstrap_config or BootstrapMCTSConfig()
+    py_rng = rng or random.Random()
+
+    mask = np.asarray(state.mask, dtype=bool)
+    legal_actions = np.where(mask)[0].tolist()
+    if not legal_actions:
+        raise ValueError("run_bootstrap_mcts_search called with no legal actions")
+
+    total_bootstrap_requested = int(cfg.bootstrap_simulations_per_action) * len(legal_actions)
+    session_target = int(mcts_config.num_simulations) + max(0, total_bootstrap_requested)
+    session = create_mcts_session(
+        env,
+        model,
+        state=state,
+        turns_taken=int(turns_taken),
+        device=device,
+        config=MCTSConfig(
+            num_simulations=int(session_target),
+            c_puct=float(mcts_config.c_puct),
+            temperature_moves=int(mcts_config.temperature_moves),
+            temperature=float(mcts_config.temperature),
+            eps=float(mcts_config.eps),
+            root_dirichlet_noise=bool(mcts_config.root_dirichlet_noise),
+            root_dirichlet_epsilon=float(mcts_config.root_dirichlet_epsilon),
+            root_dirichlet_alpha_total=float(mcts_config.root_dirichlet_alpha_total),
+            eval_batch_size=int(cfg.eval_batch_size),
+            use_forced_playouts=bool(mcts_config.use_forced_playouts),
+            forced_playouts_k=float(mcts_config.forced_playouts_k),
+        ),
+        rng=py_rng,
+    )
+
+    if total_bootstrap_requested > 0:
+        bootstrap_budgets = _split_bootstrap_budget(total_bootstrap_requested, len(legal_actions))
+        for action_idx, action_budget in zip(legal_actions, bootstrap_budgets):
+            if action_budget <= 0:
+                continue
+            session.advance(int(action_budget), forced_root_action_idx=int(action_idx))
+
+    sims_left = int(session_target) - int(session.simulations_completed)
+    result = session.advance(int(sims_left)) if sims_left > 0 else session.snapshot()
+    return DeterminizedPolicyResult(
+        action_idx=int(result.chosen_action_idx),
+        visit_probs=np.asarray(result.visit_probs, dtype=np.float32),
+        root_best_value_mean=float(result.root_best_value),
+        num_determinizations=1,
+        q_values=np.asarray(result.q_values, dtype=np.float32),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main policy class
 # ---------------------------------------------------------------------------
@@ -639,10 +716,11 @@ class DeterminizedMCTSPolicy:
     mcts_config: MCTSConfig
     device: str = "cpu"
     determinization_samples: int = 1
-    search_type: Literal["mcts", "ismcts", "alphabeta", "forced_child"] = "mcts"
+    search_type: Literal["mcts", "mcts_bootstrap", "ismcts", "alphabeta", "forced_child"] = "mcts"
     gpu_batching_enabled: bool = False
     alphabeta_config: AlphaBetaConfig = field(default_factory=AlphaBetaConfig)
     forced_child_config: ForcedChildSearchConfig = field(default_factory=ForcedChildSearchConfig)
+    bootstrap_config: BootstrapMCTSConfig = field(default_factory=BootstrapMCTSConfig)
 
     def __post_init__(self) -> None:
         self._model = load_checkpoint(self.checkpoint_path, device=self.device)
@@ -697,6 +775,18 @@ class DeterminizedMCTSPolicy:
                 turns_taken=int(turns_taken),
                 device=self.device,
                 config=self.forced_child_config,
+                rng=rng,
+            )
+
+        if self.search_type == "mcts_bootstrap":
+            return run_bootstrap_mcts_search(
+                env,
+                self._model,
+                state,
+                turns_taken=int(turns_taken),
+                device=self.device,
+                mcts_config=self.mcts_config,
+                bootstrap_config=self.bootstrap_config,
                 rng=rng,
             )
 

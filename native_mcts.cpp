@@ -123,7 +123,8 @@ struct ISMCTSWorkerResult {
 NodeMetadata build_node_metadata(const GameState& state);
 
 bool is_modal_subturn_state(const GameState& state) {
-    return state.is_return_phase || state.is_noble_choice_phase;
+    return false;
+    // return state.is_return_phase || state.is_noble_choice_phase;
 }
 
 int select_max_policy_legal_action(

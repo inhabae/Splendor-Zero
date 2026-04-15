@@ -11,7 +11,21 @@ DEFAULT_SPENDEE_URL = "https://spendee.mattle.online/lobby/rooms"
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Spendee bridge against the live Meteor client state.")
     parser.add_argument("--checkpoint", required=True, help="Path to a model checkpoint (.pt)")
-    parser.add_argument("--user-data-dir", required=True, help="Persistent Chromium profile directory for Playwright")
+    parser.add_argument(
+        "--user-data-dir",
+        default=None,
+        help="Persistent Chromium profile directory for local Playwright launches; required unless a remote endpoint is used",
+    )
+    parser.add_argument(
+        "--remote-ws-url",
+        default=None,
+        help="Playwright browser server websocket endpoint, for example ws://WINDOWS_IP:8888/splendor-bridge",
+    )
+    parser.add_argument(
+        "--remote-cdp-url",
+        default=None,
+        help="Chrome DevTools endpoint, for example http://WINDOWS_IP:9222",
+    )
     parser.add_argument(
         "--player-seat",
         choices=("P0", "P1", "auto"),
@@ -21,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-url", default=DEFAULT_SPENDEE_URL, help="Spendee page to open")
     parser.add_argument(
         "--search-type",
-        choices=("mcts", "ismcts", "alphabeta", "forced_child"),
+        choices=("mcts", "mcts_bootstrap", "ismcts", "alphabeta", "forced_child"),
         default="mcts",
         help="Search backend to use for move selection",
     )
@@ -42,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Explicit leaf evaluation batch size for MCTS/ISMCTS; overrides --gpu-batching-enabled when set",
+    )
+    parser.add_argument(
+        "--bootstrap-simulations-per-action",
+        type=int,
+        default=0,
+        help="For --search-type mcts_bootstrap: first-phase MCTS simulations allocated to each legal root action",
     )
     # --- Alpha-Beta options (only used when --search-type alphabeta) ---
     parser.add_argument(
@@ -126,13 +146,20 @@ async def _run_async(args: argparse.Namespace) -> None:
     eval_batch_size = None if args.eval_batch_size is None else int(args.eval_batch_size)
     if eval_batch_size is not None and eval_batch_size <= 0:
         raise ValueError("--eval-batch-size must be positive")
+    if args.remote_ws_url and args.remote_cdp_url:
+        raise ValueError("Choose only one of --remote-ws-url or --remote-cdp-url")
+    if not args.user_data_dir and not args.remote_ws_url and not args.remote_cdp_url:
+        raise ValueError("--user-data-dir is required unless --remote-ws-url or --remote-cdp-url is set")
     config = SpendeeBridgeConfig(
         start_url=str(args.start_url),
-        user_data_dir=str(args.user_data_dir),
+        user_data_dir=(None if args.user_data_dir is None else str(args.user_data_dir)),
         checkpoint_path=str(args.checkpoint),
+        remote_ws_url=(None if args.remote_ws_url is None else str(args.remote_ws_url)),
+        remote_cdp_url=(None if args.remote_cdp_url is None else str(args.remote_cdp_url)),
         player_seat=None if str(args.player_seat) == "auto" else str(args.player_seat),
         search_type=str(args.search_type),
         num_simulations=int(args.num_simulations),
+        bootstrap_simulations_per_action=int(args.bootstrap_simulations_per_action),
         determinization_samples=int(args.determinization_samples),
         gpu_batching_enabled=bool(args.gpu_batching_enabled),
         eval_batch_size=eval_batch_size,
