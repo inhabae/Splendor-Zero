@@ -725,6 +725,7 @@ class DeterminizedMCTSPolicy:
     def __post_init__(self) -> None:
         self._model = load_checkpoint(self.checkpoint_path, device=self.device)
 
+    
     def _run_search(
         self,
         env: SplendorNativeEnv,
@@ -733,6 +734,23 @@ class DeterminizedMCTSPolicy:
         turns_taken: int,
         rng: random.Random,
     ):
+        # Short-circuit: if there is exactly 1 legal action, return it immediately without searching.
+        mask = np.asarray(state.mask, dtype=bool)
+        legal_actions = np.where(mask)[0].tolist()
+        if len(legal_actions) == 1:
+            action_idx = legal_actions[0]
+            visit_probs = np.zeros(len(mask), dtype=np.float32)
+            visit_probs[action_idx] = 1.0
+            q_values = np.full(len(mask), np.nan, dtype=np.float32)
+            
+            return DeterminizedPolicyResult(
+                action_idx=action_idx,
+                visit_probs=visit_probs,
+                root_best_value_mean=0.0,  # 0.0 is returned as a placeholder since value doesn't matter for a forced move
+                num_determinizations=1,
+                q_values=q_values,
+            )
+
         def _run_mcts_fallback():
             mcts_cfg = MCTSConfig(
                 num_simulations=int(self.mcts_config.num_simulations),
@@ -841,13 +859,11 @@ class DeterminizedMCTSPolicy:
         )
 
     def choose_action(self, shadow: ShadowState, *, rng: random.Random | None = None) -> DeterminizedPolicyResult:
-        from collections import Counter
-        
         random_source = rng or random.Random()
-        num_votes = 3
         results = []
         
-        for _ in range(num_votes):
+        # 1. Run the first two searches
+        for _ in range(2):
             payload = build_root_determinized_payload(shadow, rng=random_source)
             res = self._choose_action_from_payload(
                 payload,
@@ -856,11 +872,24 @@ class DeterminizedMCTSPolicy:
             )
             results.append(res)
             
-        # Count the frequency of each chosen action index
+        # 2. Check for early consensus
+        if results[0].action_idx == results[1].action_idx:
+            return results[0]
+
+        # 3. Only run the third search if the first two differ
+        payload = build_root_determinized_payload(shadow, rng=random_source)
+        res_three = self._choose_action_from_payload(
+            payload,
+            turns_taken=int(payload.get("move_number", 0)),
+            rng=random_source,
+        )
+        results.append(res_three)
+        
+        # 4. Return the winner of the tie-break (majority vote)
+        from collections import Counter
         action_counts = Counter(r.action_idx for r in results)
         best_action, _ = action_counts.most_common(1)[0]
         
-        # Return a result payload corresponding to the most frequent action
         for r in results:
             if r.action_idx == best_action:
                 return r
@@ -876,10 +905,13 @@ class DeterminizedMCTSPolicy:
         from collections import Counter
 
         random_source = rng or random.Random()
-        num_votes = 3
         all_results: list[tuple[DeterminizedPolicyResult, tuple[int, ...]]] = []
         
-        for _ in range(num_votes):
+        for i in range(3):
+            # Optimization: If the first two results are identical, skip the third search
+            if len(all_results) == 2 and all_results[0][1] == all_results[1][1]:
+                break
+
             payload = build_root_determinized_payload(shadow, rng=random_source)
             turns_taken = int(payload.get("move_number", 0))
             chosen: list[int] = []
