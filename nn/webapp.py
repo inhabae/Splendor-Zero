@@ -261,15 +261,15 @@ class JumpToSnapshotRequest(BaseModel):
 
 
 class EngineThinkRequest(BaseModel):
-    num_simulations: int | None = Field(default=None, ge=1, le=400000)
+    num_simulations: int | None = Field(default=None, ge=1, le=1000000)
     search_type: Literal["mcts", "mcts_gpu", "mcts_bootstrap", "ismcts", "alphabeta", "forced_child"] = "mcts"
     continuous_until_cancel: bool = False
-    max_total_simulations: int | None = Field(default=None, ge=1, le=400000)
+    max_total_simulations: int | None = Field(default=None, ge=1, le=1000000)
     eval_batch_size: int | None = Field(default=None, ge=1, le=1024)
     forced_root_action_idx: int | None = Field(default=None, ge=0, lt=ACTION_DIM)
     alphabeta_depth: int | None = Field(default=None, ge=1, le=64)
-    forced_child_simulations_per_action: int | None = Field(default=None, ge=1, le=400000)
-    bootstrap_simulations_per_action: int | None = Field(default=None, ge=1, le=400000)
+    forced_child_simulations_per_action: int | None = Field(default=None, ge=1, le=1000000)
+    bootstrap_simulations_per_action: int | None = Field(default=None, ge=1, le=1000000)
 
 
 class RevealCardRequest(BaseModel):

@@ -34,12 +34,12 @@ const COLOR_ORDER: CatalogCardDTO['bonus_color'][] = ['white', 'blue', 'green', 
 
 const POLL_MS = 400;
 const LIVE_POLL_MS = 1000;
-const LIVE_SEARCH_MAX_SIMULATIONS = 400000;
+const LIVE_SEARCH_MAX_SIMULATIONS = 1_000_000;
 const DEFAULT_DEEP_ANALYSIS_SIMULATIONS = 50_000;
-const DEFAULT_GPU_EVAL_BATCH_SIZE = 32;
-const MAX_EVAL_BATCH_SIZE = 1024;
+const DEFAULT_GPU_EVAL_BATCH_SIZE = 64;
+const MAX_EVAL_BATCH_SIZE = 64;
 const DEFAULT_ALPHABETA_DEPTH = 3;
-const DEFAULT_BOOTSTRAP_SIMULATIONS_PER_ACTION = 2000;
+const DEFAULT_BOOTSTRAP_SIMULATIONS_PER_ACTION = 5000;
 
 function analysisPublishInterval(totalSimulations: number): number {
   const normalized = Number.isInteger(totalSimulations) && totalSimulations >= 1 ? totalSimulations : 1;
