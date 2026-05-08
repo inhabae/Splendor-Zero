@@ -123,6 +123,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Use a fixed minimum opponent rating gate; when set, overrides relative gap mode",
     )
+    parser.add_argument(
+        "--accept-user",
+        default=None,
+        help=(
+            "Only accept/start against an opponent whose username ends with this exact suffix; "
+            "non-matching or unknown usernames are kicked"
+        ),
+    )
     return parser
 
 
@@ -175,6 +183,7 @@ async def _run_async(args: argparse.Namespace) -> None:
         min_opponent_rating=int(args.min_opponent_rating),
         relative_rating_gap=(None if args.relative_rating_gap is None else int(args.relative_rating_gap)),
         min_rating=(None if args.min_rating is None else int(args.min_rating)),
+        accept_user_suffix=(None if args.accept_user is None else str(args.accept_user)),
         artifact_dir=str(args.artifact_dir),
     )
     runner = SpendeeBridgeRunner(config)

@@ -88,6 +88,7 @@ class SpendeeBridgeConfig:
     min_opponent_rating: int = 1980
     relative_rating_gap: int | None = 150
     min_rating: int | None = None
+    accept_user_suffix: str | None = None
     selectors: SpendeeSelectorConfig = field(default_factory=SpendeeSelectorConfig)
     artifact_dir: str = "nn_artifacts/spendee_bridge"
 
@@ -223,6 +224,35 @@ class SpendeeBridgeRunner:
             except Exception:
                 return True
         return False
+
+    def _is_transient_page_error(self, exc: Exception) -> bool:
+        if self._page_is_closed(getattr(exc, "page", None)):
+            return True
+        message = str(exc).lower()
+        markers = (
+            "target page, context or browser has been closed",
+            "target closed",
+            "execution context was destroyed",
+            "cannot find context with specified id",
+            "frame was detached",
+            "frame has been detached",
+            "navigation interrupted",
+            "most likely because of a navigation",
+            "session closed",
+        )
+        return any(marker in message for marker in markers)
+
+    async def _observe_with_recovery(self, page) -> ObservedBoardState | None:
+        try:
+            return await self.observer.observe(page)
+        except Exception as exc:
+            if not self._is_transient_page_error(exc):
+                raise
+            self._write_status(
+                stage="page_transition_detected",
+                extra={"error": type(exc).__name__, "detail": str(exc)},
+            )
+            return None
 
     def _write_inactive_action_artifacts(
         self,
@@ -566,7 +596,7 @@ class SpendeeBridgeRunner:
     ) -> ObservedBoardState | None:
         deadline = asyncio.get_running_loop().time() + self.config.action_settle_timeout_sec
         while asyncio.get_running_loop().time() < deadline:
-            observed = await self.observer.observe(page)
+            observed = await self._observe_with_recovery(page)
             if observed is None:
                 await asyncio.sleep(self.config.poll_interval_sec)
                 continue
@@ -585,7 +615,7 @@ class SpendeeBridgeRunner:
         stable_count = 0
         last: ObservedBoardState | None = None
         while asyncio.get_running_loop().time() < deadline:
-            observed = await self.observer.observe(page)
+            observed = await self._observe_with_recovery(page)
             if observed is None:
                 stable_count = 0
                 last = None
@@ -781,6 +811,7 @@ class SpendeeBridgeRunner:
             "min_opponent_rating": int(self.config.min_opponent_rating),
             "min_rating": (None if self.config.min_rating is None else int(self.config.min_rating)),
             "relative_rating_gap": (None if self.config.relative_rating_gap is None else int(self.config.relative_rating_gap)),
+            "accept_user_suffix": self.config.accept_user_suffix,
             "dom_kicked": 0,
             "dom_button_count": 0,
             "result": "init",
@@ -789,7 +820,7 @@ class SpendeeBridgeRunner:
         try:
             raw = await page.evaluate(
                 r"""
-                                async ({ minOpponentRating, relativeRatingGap, minRating }) => {
+                                async ({ minOpponentRating, relativeRatingGap, minRating, acceptUserSuffix }) => {
                                     const out = {
                                         kicked: 0,
                                         roomId: null,
@@ -803,6 +834,8 @@ class SpendeeBridgeRunner:
                                         candidateCount: 0,
                                         eligibleCount: 0,
                                         blockingLowCount: 0,
+                                        blockingUserSuffixCount: 0,
+                                        acceptUserSuffix: acceptUserSuffix == null ? null : String(acceptUserSuffix),
                                         noParticipantList: false,
                                         attemptErrors: [],
                                         error: null,
@@ -872,6 +905,18 @@ class SpendeeBridgeRunner:
                                         const m = text.match(new RegExp(`${esc}[^\\n\\r]*?\\((\\d{3,4})\\)`, 'i'));
                                         return m ? parseRating(m[1]) : null;
                                     };
+                  const usernameAccepts = (username) => {
+                    if (acceptUserSuffix == null || String(acceptUserSuffix) === '') {
+                      return true;
+                    }
+                    return typeof username === 'string' && username.endsWith(String(acceptUserSuffix));
+                  };
+
+                  const userAccepted = (uid, fallbackName = null) => {
+                    const username = usernameById(uid) || fallbackName;
+                    return usernameAccepts(username);
+                  };
+
                   const userRating = (uid) => {
                     const u = userById(uid);
                                         if (u) {
@@ -1016,6 +1061,7 @@ class SpendeeBridgeRunner:
                                             rawSpotRating: spotRating,
                                             mapRating: fromMap,
                                             state: spot && spot.state,
+                                            usernameAccepted: uid === String(me) ? true : userAccepted(uid, spotName),
                                             isMe: uid === String(me),
                                         });
                                     }
@@ -1040,17 +1086,26 @@ class SpendeeBridgeRunner:
                                                 continue;
                                             }
                                             const r = userRating(uid);
+                                            const acceptedUser = userAccepted(uid);
                                             if (r == null) {
                                                 out.unknownCandidates.push(uid);
                                             } else {
-                                                out.knownCandidates.push({ uid, rating: r });
-                                                if (r >= threshold) {
+                                                out.knownCandidates.push({ uid, rating: r, usernameAccepted: acceptedUser });
+                                            }
+                                            if (acceptUserSuffix == null || String(acceptUserSuffix) === '') {
+                                                if (r != null && r >= threshold) {
                                                     out.eligibleCount += 1;
                                                 } else {
                                                     out.blockingLowCount += 1;
                                                 }
+                                            } else if (acceptedUser) {
+                                                out.eligibleCount += 1;
+                                            } else {
+                                                out.blockingUserSuffixCount += 1;
                                             }
-                                            const shouldKick = r == null || r < threshold;
+                                            const shouldKick = (acceptUserSuffix == null || String(acceptUserSuffix) === '')
+                                                ? (r == null || r < threshold)
+                                                : !acceptedUser;
                                             if (!shouldKick) {
                                                 continue;
                                             }
@@ -1100,18 +1155,27 @@ class SpendeeBridgeRunner:
                                         const spotRating = parseRating(player.rating ?? player.elo ?? player.mmr);
                                         const fromMap = spotName ? nameToRating.get(spotName.toLowerCase()) : null;
                                         const resolvedRating = spotRating != null ? spotRating : (fromMap != null ? fromMap : userRating(uid));
+                                        const acceptedUser = userAccepted(uid, spotName);
                                         if (resolvedRating == null) {
                                             out.unknownCandidates.push(uid);
                                         } else {
-                                            out.knownCandidates.push({ uid, rating: resolvedRating, source: 'spots' });
-                                            if (resolvedRating >= threshold) {
+                                            out.knownCandidates.push({ uid, rating: resolvedRating, source: 'spots', usernameAccepted: acceptedUser, name: spotName });
+                                        }
+                                        if (acceptUserSuffix == null || String(acceptUserSuffix) === '') {
+                                            if (resolvedRating != null && resolvedRating >= threshold) {
                                                 out.eligibleCount += 1;
                                             } else {
                                                 out.blockingLowCount += 1;
                                             }
+                                        } else if (acceptedUser) {
+                                            out.eligibleCount += 1;
+                                        } else {
+                                            out.blockingUserSuffixCount += 1;
                                         }
 
-                                        const shouldKick = resolvedRating == null || resolvedRating < threshold;
+                                        const shouldKick = (acceptUserSuffix == null || String(acceptUserSuffix) === '')
+                                            ? (resolvedRating == null || resolvedRating < threshold)
+                                            : !acceptedUser;
                                         if (!shouldKick) {
                                             continue;
                                         }
@@ -1162,6 +1226,7 @@ class SpendeeBridgeRunner:
                     "minOpponentRating": int(self.config.min_opponent_rating),
                     "relativeRatingGap": (None if self.config.relative_rating_gap is None else int(self.config.relative_rating_gap)),
                     "minRating": (None if self.config.min_rating is None else int(self.config.min_rating)),
+                    "acceptUserSuffix": self.config.accept_user_suffix,
                 },
             )
             if isinstance(raw, dict):
@@ -1205,18 +1270,22 @@ class SpendeeBridgeRunner:
             known_candidates = meteor_result.get("knownCandidates") if isinstance(meteor_result, dict) else None
             if isinstance(known_candidates, list):
                 low_count = 0
+                suffix_mismatch_count = 0
                 for item in known_candidates:
                     if not isinstance(item, dict):
                         continue
+                    if self.config.accept_user_suffix is not None and not bool(item.get("usernameAccepted")):
+                        suffix_mismatch_count += 1
                     rating = item.get("rating")
                     try:
                         rv = int(rating)
                     except Exception:
                         continue
-                    if rv < int(effective_min_rating):
+                    if self.config.accept_user_suffix is None and rv < int(effective_min_rating):
                         low_count += 1
-                if low_count > 0:
+                if low_count > 0 or suffix_mismatch_count > 0:
                     kick_debug["low_rating_candidates"] = low_count
+                    kick_debug["user_suffix_mismatch_candidates"] = suffix_mismatch_count
                     kick_debug["result"] = "kick_attempts_failed"
                     self.logger.write_json("last_room_kick_debug", kick_debug)
                     return 0, False
@@ -1224,7 +1293,7 @@ class SpendeeBridgeRunner:
                 kick_debug["result"] = "cannot_identify_room_participants"
                 self.logger.write_json("last_room_kick_debug", kick_debug)
                 return 0, False
-            if unknown_candidates_count > 0:
+            if unknown_candidates_count > 0 and self.config.accept_user_suffix is None:
                 kick_debug["result"] = "unknown_rating_candidates_not_kicked"
                 self.logger.write_json("last_room_kick_debug", kick_debug)
                 return 0, False
@@ -1232,7 +1301,13 @@ class SpendeeBridgeRunner:
             candidate_count = int(meteor_result.get("candidateCount") or 0)
             eligible_count = int(meteor_result.get("eligibleCount") or 0)
             blocking_low_count = int(meteor_result.get("blockingLowCount") or 0)
-            can_start = candidate_count > 0 and eligible_count >= candidate_count and blocking_low_count == 0
+            blocking_user_suffix_count = int(meteor_result.get("blockingUserSuffixCount") or 0)
+            can_start = (
+                candidate_count > 0
+                and eligible_count >= candidate_count
+                and blocking_low_count == 0
+                and blocking_user_suffix_count == 0
+            )
             if can_start:
                 kick_debug["result"] = "all_opponents_eligible"
                 self.logger.write_json("last_room_kick_debug", kick_debug)
@@ -1250,7 +1325,7 @@ class SpendeeBridgeRunner:
             kicked_by_dom = int(
                 await page.evaluate(
                     """
-                    ({ minOpponentRating }) => {
+                    ({ minOpponentRating, acceptUserSuffix }) => {
                       const rowSelector = 'tr,li,[role="row"],.player,.player-row,.room-player,.member,.participant,.row,.item';
                       const controlSelector = 'button,[role="button"],a,[title*="kick" i],[aria-label*="kick" i],[data-tooltip*="kick" i],[class*="kick" i],[title*="remove" i],[aria-label*="remove" i],[class*="remove" i]';
                       const ratingFromText = (text) => {
@@ -1261,6 +1336,17 @@ class SpendeeBridgeRunner:
                         }
                         const v = Number.parseInt(m[1], 10);
                         return Number.isFinite(v) ? v : null;
+                      };
+                      const usernameFromText = (text) => {
+                        const raw = String(text || '').trim();
+                        const m = raw.match(/^(.+?)\\s*(?:\\(\\d{3,4}\\)|\\b\\d{3,4}\\b)/);
+                        return (m ? m[1] : raw).trim();
+                      };
+                      const usernameAccepted = (text) => {
+                        if (acceptUserSuffix == null || String(acceptUserSuffix) === '') {
+                          return true;
+                        }
+                        return usernameFromText(text).endsWith(String(acceptUserSuffix));
                       };
                       const isVisible = (el) => {
                         const rect = el.getBoundingClientRect();
@@ -1277,8 +1363,13 @@ class SpendeeBridgeRunner:
                       let kicked = 0;
                       for (const el of controls) {
                         const row = el.closest(rowSelector) || el.parentElement || el;
-                        const rating = ratingFromText(String((row && row.innerText) || ''));
-                                                if (rating == null || rating >= Number(minOpponentRating)) {
+                        const rowText = String((row && row.innerText) || '');
+                        const rating = ratingFromText(rowText);
+                        const shouldKickForUser = !(usernameAccepted(rowText));
+                        const shouldKickForRating = (acceptUserSuffix == null || String(acceptUserSuffix) === '')
+                          && rating != null
+                          && rating < Number(minOpponentRating);
+                        if (!shouldKickForUser && !shouldKickForRating) {
                           continue;
                         }
                         try {
@@ -1289,7 +1380,7 @@ class SpendeeBridgeRunner:
                       return kicked;
                     }
                     """,
-                    {"minOpponentRating": int(effective_min_rating)},
+                    {"minOpponentRating": int(effective_min_rating), "acceptUserSuffix": self.config.accept_user_suffix},
                 )
             )
         except Exception:
@@ -1327,8 +1418,19 @@ class SpendeeBridgeRunner:
             except Exception:
                 continue
 
-            player_rating = self._extract_rating_from_text(str(row_text))
-            if player_rating is not None and player_rating < int(effective_min_rating):
+            row_text_str = str(row_text)
+            player_rating = self._extract_rating_from_text(row_text_str)
+            username_part = re.sub(r"\s*(?:\(\d{3,4}\)|\b\d{3,4}\b).*", "", row_text_str).strip()
+            should_kick_for_user = (
+                self.config.accept_user_suffix is not None
+                and not username_part.endswith(str(self.config.accept_user_suffix))
+            )
+            should_kick_for_rating = (
+                self.config.accept_user_suffix is None
+                and player_rating is not None
+                and player_rating < int(effective_min_rating)
+            )
+            if should_kick_for_user or should_kick_for_rating:
                 try:
                     await button.click()
                     kicked += 1
@@ -1545,7 +1647,7 @@ class SpendeeBridgeRunner:
         for candidates in (room_candidates, fallback_candidates):
             for page, _probe in candidates:
                 try:
-                    observed = await self.observer.observe(page)
+                    observed = await self._observe_with_recovery(page)
                 except Exception:
                     continue
                 if observed is not None:
